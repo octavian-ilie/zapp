@@ -1,5 +1,4 @@
 # Project Zapp: files that must never be committed to the public repository.
-# See CLAUDE.md, "Privacy".
 
 # --- Secrets, credentials and environment -----------------------------------
 .env
@@ -131,4 +130,5 @@ Thumbs.db
 *~
 .direnv/
 .claude/settings.local.json
+CLAUDE.md
 CLAUDE.local.md

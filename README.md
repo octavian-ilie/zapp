@@ -187,8 +187,9 @@ the upstream baseline is assessed.
 ## Documentation
 
 - [NOTICE](NOTICE): attribution and third-party licensing.
-- [CLAUDE.md](CLAUDE.md): engineering standards and contributor instructions,
-  including for AI-assisted development.
+
+Technical documentation will be added as components are implemented and
+verified.
 
 ## Responsible use
 
