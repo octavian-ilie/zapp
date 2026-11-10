@@ -1,0 +1,30 @@
+Zapp CDMA2000 / EV-DO
+Copyright 2026 Octavian Ilie
+
+This product includes original material licensed under the Apache License,
+Version 2.0. See the LICENSE file.
+
+Project Zapp is an independent project. It is not affiliated with, endorsed
+by or a continuation of Telemobil S.A., OTE, Cosmote Romania, Telekom Romania
+or the Zapp commercial network.
+
+------------------------------------------------------------------------------
+Third-party software
+------------------------------------------------------------------------------
+
+1xBTS
+  Project:   https://github.com/chrismoos/1xbts
+  Author:    Chris Moos and the 1xBTS contributors
+  License:   Apache License, Version 2.0
+  Status:    Not yet included in this repository.
+
+  When 1xBTS source is imported, it will keep its original LICENSE and
+  copyright notices. The exact upstream commit and any Project Zapp
+  modifications will be recorded here and next to the imported source.
+  Modified files will carry prominent notices stating that they were changed,
+  as Section 4(b) of the Apache License requires. Project Zapp does not claim
+  ownership of upstream contributions and does not relicense them.
+
+Components that 1xBTS bundles or depends on (for example under its external/
+directory) are subject to their own licences. They will be listed here, with
+their licence terms, when they are imported.
