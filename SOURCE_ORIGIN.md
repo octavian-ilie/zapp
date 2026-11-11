@@ -14,7 +14,7 @@ Zapp adds next to it.
 | Import date | 2026-11-11 |
 | Imported paths | All 1,649 files tracked at that commit, at their original paths |
 | Git LFS | 37 of those files are stored with Git LFS, as upstream stores them (34 distinct objects, 229 MB in total) |
-| Modifications | Five upstream files, listed under [Changes made by Project Zapp](#changes-made-by-project-zapp) |
+| Modifications | Six upstream files, listed under [Changes made by Project Zapp](#changes-made-by-project-zapp) |
 
 The import is a one-time snapshot. The repository has no Git submodules, no
 subtrees, no upstream remote and no automatic synchronisation, and nothing is
@@ -51,6 +51,7 @@ Zapp modified it, as Section 4(b) of the Apache License requires.
 | `1xbts-web/src/app/api/subscribers/route.ts` | `GET` fetches every page of subscribers (1,000 per request) instead of only the newest 100. | The subscribers page shows only this list, so subscribers beyond the newest 100 could not be reached. Against a test HLR holding 2,345 subscribers, the route returned 100 before the change and all 2,345 after it. |
 | `crates/cdma-hlr/src/lib/repository.rs` | New method `HlrRepository::upsert_subscriber_with_identity`. `PostgresHlrRepository` runs it in one database transaction. The existing subscriber, identity and IMEI queries moved unchanged into helper functions shared by both paths. Other implementations keep the previous step-by-step behaviour by default. | When the HLR rejected the identity in a provisioning request (an ESN, MEID or IMEI already in use, or an identity without an IMSI), the subscriber had already been created or its profile overwritten. The new test `crates/cdma-hlr/tests/provisioning_atomicity.rs` failed before the change and passes after it. |
 | `crates/cdma-hlr/src/lib/service.rs` | `UpsertSubscriber` stores the subscriber, identity and IMEI through the new method. | As above. |
+| `CHANGELOG.md` | Three entries at the top of `# HEAD`, marked "(Project Zapp)", for the three bug fixes above. | Upstream's `AGENTS.md` asks for a changelog entry for every user-visible change. |
 
 ## Project Zapp files
 

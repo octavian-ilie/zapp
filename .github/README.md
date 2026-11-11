@@ -152,9 +152,9 @@ SIP voice gateway, the SIM applet, the test data and the CI workflow. Nothing
 is cloned from 1xBTS at build or install time. From here on, Project Zapp
 develops it independently, and keeps its own changes separate from this
 baseline. So far, Project Zapp has fixed one intermittently failing test and
-three bugs found in code review, in five upstream files.
-[`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md) records the import, how it was
-checked, and every change.
+three bugs found in code review, in five upstream files, and listed the bug
+fixes in upstream's `CHANGELOG.md`. [`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md)
+records the import, how it was checked, and every change.
 
 Validation of the import is in progress. Upstream's CI workflow runs
 unmodified on this repository. On GitHub it builds the workspace, including
