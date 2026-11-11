@@ -1,0 +1,1897 @@
+//! Access-channel ingress: registration, origination, page response,
+//! and order handling.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use cdma_common::access::{AccessMessage, OriginationMessage};
+use cdma_common::bits::Bitstream;
+use cdma_common::error::Error;
+use cdma_common::events::AccessChannelEvent;
+use cdma_common::formatting::format_dtmf_digits;
+use cdma_common::lac::{
+    message_types::MessageId,
+    paging_messages::{MsAddress, MsPageAddress, OrderMessage, PagingChannelMessage},
+};
+use cdma_voice::VoiceCodec;
+use chrono::Duration as ChronoDuration;
+use log::{debug, info, warn};
+use uuid::Uuid;
+
+use crate::addressing::{
+    format_ms_address, is_packet_data_so, packet_data_service_option_for_origination,
+    select_imsi_class0_forward_address,
+};
+use cdma_common::consts::{SERVICE_OPTION_BASIC_VOICE, SR1_CHIP_RATE_HZ};
+
+use super::{
+    AccessCellId, AccessRegistrationUpdate, Bsc, BtsRegistry, MobileStation,
+    PendingA1AssignmentKind, PendingPage, VoiceLegRole, mark_reverse_regular_msg_seq_received,
+    next_pch_correlation_id, traffic_signaling::reverse_order_code,
+};
+
+/// Result of an async HLR subscriber lookup, sent back to the BSC run loop.
+pub(crate) struct HlrResolution {
+    pub(crate) fwd_address: MsAddress,
+    pub(crate) observed_esn: Option<u32>,
+    pub(crate) observed_meid: Option<String>,
+    pub(crate) subscriber_id: Option<Uuid>,
+    pub(crate) phone_number: Option<String>,
+    pub(crate) display_name: Option<String>,
+    pub(crate) canonical_imsi: Option<String>,
+}
+
+#[derive(Default)]
+pub(crate) struct AccessService;
+
+/// Implementation-defined r-csch inactivity interval after which MSG_SEQ_RCVD
+/// is cleared before processing the next access PDU.
+pub(crate) const ACCESS_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Must stay well inside the mobile's access acknowledgment timeout.
+pub(crate) const BS_ACK_HOLD: Duration = Duration::from_millis(100);
+
+struct HeldBsAck {
+    cell: Option<AccessCellId>,
+    addr: MsAddress,
+    ack_msg_seq: u8,
+    due: tokio::time::Instant,
+    requested_tx_time: Option<cdma_common::time::CdmaSystemTime>,
+    tx_deadline: Option<cdma_common::time::CdmaSystemTime>,
+}
+
+/// Forward common-channel transmit side. Every send names the cell it is
+/// destined for. `None` resolves to the sole enrolled cell.
+#[derive(Clone)]
+pub(crate) struct AccessTx {
+    pub(crate) bts: Arc<BtsRegistry>,
+    held_bs_acks: Arc<parking_lot::Mutex<Vec<HeldBsAck>>>,
+}
+
+pub(crate) enum AccessDuplicateDecision {
+    NewSdu,
+    Duplicate { addr: MsAddress, msg_seq: u8 },
+}
+
+impl AccessTx {
+    pub(crate) fn new(bts: Arc<BtsRegistry>) -> Self {
+        Self {
+            bts,
+            held_bs_acks: Arc::default(),
+        }
+    }
+
+    /// Any directed F-PCH message to the mobile within the hold carries the
+    /// acknowledgment, and the order is dropped.
+    pub(crate) fn hold_bs_ack_order(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        ack_msg_seq: u8,
+        requested_tx_time: Option<cdma_common::time::CdmaSystemTime>,
+        tx_deadline: Option<cdma_common::time::CdmaSystemTime>,
+    ) {
+        debug!(
+            "BSC: holding Base Station Acknowledgment Order (ack_seq={}) for {} up to {} ms",
+            ack_msg_seq,
+            format_ms_address(addr),
+            BS_ACK_HOLD.as_millis(),
+        );
+        let mut held = self.held_bs_acks.lock();
+        if let Some(ack) = held
+            .iter()
+            .find(|ack| ack.cell == cell && ack.addr == *addr && ack.ack_msg_seq == ack_msg_seq)
+            && ack.due <= tokio::time::Instant::now() + BS_ACK_HOLD
+        {
+            return;
+        }
+        held.retain(|ack| ack.addr != *addr);
+        held.push(HeldBsAck {
+            cell,
+            addr: addr.clone(),
+            ack_msg_seq,
+            due: tokio::time::Instant::now() + BS_ACK_HOLD,
+            requested_tx_time,
+            tx_deadline,
+        });
+    }
+
+    pub(crate) fn next_held_bs_ack_due(&self) -> Option<tokio::time::Instant> {
+        self.held_bs_acks.lock().iter().map(|ack| ack.due).min()
+    }
+
+    pub(crate) fn send_due_bs_acks(&self, now: tokio::time::Instant) {
+        let due: Vec<HeldBsAck> = {
+            let mut held = self.held_bs_acks.lock();
+            let (due, waiting) = std::mem::take(&mut *held)
+                .into_iter()
+                .partition(|ack| ack.due <= now);
+            *held = waiting;
+            due
+        };
+        for ack in due {
+            info!(
+                "BSC: no directed message to {} within {} ms, sending held BS Ack",
+                format_ms_address(&ack.addr),
+                BS_ACK_HOLD.as_millis(),
+            );
+            if let Err(e) = self.send_bs_ack_order(
+                ack.cell,
+                &ack.addr,
+                ack.ack_msg_seq,
+                ack.requested_tx_time,
+                ack.tx_deadline,
+            ) {
+                warn!("BSC: failed to send held BS Ack: {}", e);
+            }
+        }
+    }
+
+    fn release_held_bs_ack(&self, addr: &MsAddress, wire_msg_type: u8) {
+        let mut held = self.held_bs_acks.lock();
+        let Some(pos) = held.iter().position(|ack| ack.addr == *addr) else {
+            return;
+        };
+        let ack = held.swap_remove(pos);
+        info!(
+            "BSC: BS Ack (ack_seq={}) for {} carried by directed message type 0x{:02X}",
+            ack.ack_msg_seq,
+            format_ms_address(addr),
+            wire_msg_type,
+        );
+    }
+
+    pub(crate) fn send_directed_fpch(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        message_id: MessageId,
+        _paging_message: PagingChannelMessage,
+        sdu: cdma_common::bits::Bitstream,
+        ack_req: bool,
+    ) -> Result<u32, Error> {
+        let wire_msg_type = message_id
+            .wire_type(cdma_common::lac::message_types::WireChannel::ForwardCommon)
+            .unwrap_or(0);
+        let correlation_id = self.send_pch_for_directed(cell, addr, wire_msg_type, &sdu, ack_req);
+        self.release_held_bs_ack(addr, wire_msg_type);
+        Ok(correlation_id)
+    }
+
+    fn send_pch_for_directed(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        wire_msg_type: u8,
+        sdu: &cdma_common::bits::Bitstream,
+        ack_req: bool,
+    ) -> u32 {
+        use cdma_abis::control::typed::{
+            AbisAckNotify, AirInterfaceMessagePayload, CorrelationId, Layer2AckRequestResults,
+            PchMessageTransferMessage,
+        };
+        let mobile_id = super::paging::mobile_identity_for_ms_address(addr);
+        let sdu_bytes = sdu.to_packed_bytes();
+        let aim = AirInterfaceMessagePayload::new(wire_msg_type, sdu_bytes);
+        let corr_id = next_pch_correlation_id();
+        let pch = PchMessageTransferMessage {
+            correlation_id: Some(CorrelationId(corr_id)),
+            mobile_identities: vec![mobile_id],
+            cell_identifier_list: None,
+            air_interface_message: aim.ok(),
+            layer2_ack_request_results: if ack_req {
+                Some(Layer2AckRequestResults::request())
+            } else {
+                None
+            },
+            abis_ack_notify: if ack_req { Some(AbisAckNotify) } else { None },
+        };
+        match self.bts.control(cell) {
+            Some(bts_client) => {
+                if let Err(e) = bts_client.send_pch_message(pch) {
+                    warn!("BSC: send_pch_message failed: {}", e);
+                }
+            }
+            None => warn!(
+                "BSC: no in-service cell for {:?} — dropping F-PCH message",
+                cell
+            ),
+        }
+        corr_id
+    }
+
+    pub(crate) fn send_order(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        ack_msg_seq: u8,
+        ack_req: bool,
+        order: u8,
+        ordq: u8,
+        order_name: &str,
+        requested_tx_time: Option<cdma_common::time::CdmaSystemTime>,
+        tx_deadline: Option<cdma_common::time::CdmaSystemTime>,
+    ) -> Result<(), Error> {
+        let order_msg = OrderMessage {
+            order,
+            ordq,
+            order_specific_fields: Vec::new(),
+        };
+        let paging_message = PagingChannelMessage::Order(order_msg.clone());
+        let sdu = order_msg.to_sdu();
+
+        self.send_directed_fpch(cell, addr, MessageId::Order, paging_message, sdu, ack_req)?;
+
+        let req_tx_chip =
+            requested_tx_time.map(|t| cdma_common::time::chips_since_epoch(t, 1_228_800));
+        let deadline_chip = tx_deadline.map(|t| cdma_common::time::chips_since_epoch(t, 1_228_800));
+        info!(
+            "BSC: sending {} (ack_seq={}, ack_req={}) requested_tx_chip={:?} deadline_chip={:?}",
+            order_name, ack_msg_seq, ack_req, req_tx_chip, deadline_chip,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn send_registration_rejected(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+    ) -> Result<(), Error> {
+        self.send_order(
+            cell,
+            addr,
+            0,
+            false,
+            REGISTRATION_ORDER_CODE,
+            REGISTRATION_REJECTED_ORDQ,
+            "Registration Rejected Order",
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn send_registration_accepted(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+    ) -> Result<(), Error> {
+        self.send_order(
+            cell,
+            addr,
+            0,
+            false,
+            REGISTRATION_ORDER_CODE,
+            0,
+            "Registration Accepted Order",
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn send_bs_ack_order(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        ack_msg_seq: u8,
+        requested_tx_time: Option<cdma_common::time::CdmaSystemTime>,
+        tx_deadline: Option<cdma_common::time::CdmaSystemTime>,
+    ) -> Result<(), Error> {
+        self.send_order(
+            cell,
+            addr,
+            ack_msg_seq,
+            false,
+            super::ACKNOWLEDGMENT_ORDER_CODE,
+            0,
+            "Base Station Acknowledgment Order",
+            requested_tx_time,
+            tx_deadline,
+        )
+    }
+
+    pub(crate) fn send_release_order(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        requested_tx_time: Option<cdma_common::time::CdmaSystemTime>,
+        tx_deadline: Option<cdma_common::time::CdmaSystemTime>,
+    ) -> Result<(), Error> {
+        let order_msg = OrderMessage {
+            order: super::RELEASE_ORDER_CODE,
+            ordq: 0,
+            order_specific_fields: Vec::new(),
+        };
+        let mut sdu = Bitstream::new();
+        sdu.write_u8(order_msg.order, 6);
+        sdu.write_u8(1, 3);
+        sdu.write_u8(order_msg.ordq, 8);
+
+        let correlation_id = self.send_directed_fpch(
+            cell,
+            addr,
+            MessageId::Order,
+            PagingChannelMessage::Order(order_msg),
+            sdu,
+            false,
+        )?;
+
+        let req_tx_chip =
+            requested_tx_time.map(|t| cdma_common::time::chips_since_epoch(t, 1_228_800));
+        let deadline_chip = tx_deadline.map(|t| cdma_common::time::chips_since_epoch(t, 1_228_800));
+        info!(
+            "BSC: sending Release Order (correlation_id={}, ack_req=false) requested_tx_chip={:?} deadline_chip={:?}",
+            correlation_id, req_tx_chip, deadline_chip,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn send_intercept_order(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+    ) -> Result<(), Error> {
+        self.send_order(
+            cell,
+            addr,
+            0,
+            false,
+            super::INTERCEPT_ORDER_CODE,
+            0,
+            "Intercept Order",
+            None,
+            None,
+        )
+    }
+
+    pub(crate) fn send_service_option_rejected_release(
+        &self,
+        cell: Option<AccessCellId>,
+        addr: &MsAddress,
+        ack_msg_seq: u8,
+        requested_tx_time: Option<cdma_common::time::CdmaSystemTime>,
+        tx_deadline: Option<cdma_common::time::CdmaSystemTime>,
+    ) -> Result<(), Error> {
+        self.send_order(
+            cell,
+            addr,
+            ack_msg_seq,
+            true,
+            super::RELEASE_ORDER_CODE,
+            super::RELEASE_ORDER_SERVICE_OPTION_REJECTED_QUALIFIER,
+            "Release Order (requested service option rejected)",
+            requested_tx_time,
+            tx_deadline,
+        )
+    }
+}
+
+impl AccessService {
+    pub(crate) fn new() -> Self {
+        Self
+    }
+
+    pub(crate) fn handle_known_mobile_msg_seq(
+        &mut self,
+        mobile: &mut MobileStation,
+        event: &AccessChannelEvent,
+        activity_now: Instant,
+    ) -> AccessDuplicateDecision {
+        let Some(msg_seq) = event.msg_seq else {
+            return AccessDuplicateDecision::NewSdu;
+        };
+
+        // C.S0004-E 3.1.1.2.2.2 clears MSG_SEQ_RCVD on access after common-channel inactivity.
+        if mobile
+            .last_access_activity
+            .is_none_or(|last| activity_now.duration_since(last) > ACCESS_INACTIVITY_TIMEOUT)
+        {
+            mobile.access_msg_seq_rcvd.fill(false);
+            debug!(
+                "BSC: cleared MSG_SEQ_RCVD for {} (inactive on common channel)",
+                format_ms_address(&mobile.fwd_address),
+            );
+        }
+        mobile.last_access_activity = Some(activity_now);
+
+        if mark_reverse_regular_msg_seq_received(&mut mobile.access_msg_seq_rcvd, msg_seq) {
+            AccessDuplicateDecision::Duplicate {
+                addr: mobile.fwd_address.clone(),
+                msg_seq,
+            }
+        } else {
+            AccessDuplicateDecision::NewSdu
+        }
+    }
+
+    pub(crate) fn apply_registration(
+        &mut self,
+        bsc: &mut Bsc,
+        event: &AccessChannelEvent,
+        update: AccessRegistrationUpdate,
+    ) -> cdma_common::lac::paging_messages::MsAddress {
+        let explicit = update.explicit_registration;
+        let outcome = bsc.mobiles.apply_access_registration(event, update);
+        if !explicit {
+            return outcome.fwd_address;
+        }
+        let call_id = bsc.voice.allocate_mo_call_id();
+        bsc.a1.push_pending_registration(
+            call_id,
+            super::a1::PendingA1Registration {
+                fwd_address: outcome.fwd_address.clone(),
+                cell: event.cell,
+                received_at: tokio::time::Instant::now(),
+                event: event.clone(),
+            },
+        );
+        bsc.notify_msc_registration(&outcome.fwd_address, event, call_id);
+        outcome.fwd_address
+    }
+
+    pub(crate) async fn handle_access_event(&mut self, bsc: &mut Bsc, event: AccessChannelEvent) {
+        // Traffic channel events are routed separately
+        if let Some(walsh_code) = event.traffic_walsh_code {
+            let Some(cell) = event.cell else {
+                warn!(
+                    "BSC: traffic event on walsh={} carries no cell identifier, ignoring",
+                    walsh_code
+                );
+                return;
+            };
+            bsc.handle_traffic_event(cell, walsh_code, &event).await;
+            return;
+        }
+
+        let addr = event.address.as_deref().unwrap_or("none");
+        let l3 = event.l3_summary.as_deref().unwrap_or("unknown");
+        let rx_age_us = event
+            .rx_wall_time
+            .map(|t| t.elapsed().as_micros() as u64)
+            .unwrap_or(0);
+        let now_utc = chrono::Utc::now();
+        let air_age_us = event
+            .receive_time
+            .and_then(|t| (now_utc - t).num_microseconds());
+        let t56_margin_us = event
+            .receive_time
+            .and_then(|t| (t + ChronoDuration::milliseconds(200) - now_utc).num_microseconds());
+        let receive_chip = event
+            .receive_time
+            .map(|t| cdma_common::time::chips_since_epoch(t, SR1_CHIP_RATE_HZ));
+        info!(
+            "BSC: [access] msg chip={} abs_chip={:?} receive_chip={:?} type=\"{}\" pd={} preamble={} addr=[{}] l3=[{}] rx_age_us={} air_age_us={:?} t56_margin_us={:?} rx_hw_time_ns={}",
+            event.chip_start,
+            event.absolute_chip_start,
+            receive_chip,
+            event.msg_type_name,
+            event.pd,
+            event.preamble_frames,
+            addr,
+            l3,
+            rx_age_us,
+            air_age_us,
+            t56_margin_us,
+            event.rx_hw_time_ns.unwrap_or(0),
+        );
+        if let Some(margin_us) = t56_margin_us
+            && margin_us < 0
+            && event.ack_req
+        {
+            warn!(
+                "BSC: access response already past T56m before enqueue: msg chip={} type=\"{}\" air_age_us={:?} late_by_us={}",
+                event.chip_start, event.msg_type_name, air_age_us, -margin_us,
+            );
+        }
+
+        let fwd_address = bsc.extract_fwd_address(&event);
+        let known_mobile = fwd_address
+            .as_ref()
+            .filter(|addr| {
+                bsc.mobiles
+                    .get(addr)
+                    .is_some_and(|ms| event.esn.is_none_or(|esn| ms.esn == Some(esn)))
+            })
+            .cloned();
+        let activity_now = Instant::now();
+
+        // Per C.S0004-E 3.1.1.2.2.2: duplicate detection on the r-csch.
+        // If the mobile is already known and the MSG_SEQ has been seen,
+        // send an L2 acknowledgment only (BS Ack Order) and discard the
+        // duplicate SDU — do NOT re-deliver to Layer 3 or re-send the
+        // original L3 response. The original response has its own MSG_SEQ
+        // and retransmission lifecycle on the f-csch.
+        if let Some(addr) = known_mobile {
+            let duplicate_decision = bsc
+                .mobiles
+                .update(&addr, |ms| {
+                    self.handle_known_mobile_msg_seq(ms, &event, activity_now)
+                })
+                .unwrap_or(AccessDuplicateDecision::NewSdu);
+            bsc.record_mobile_activity(&addr, &event, activity_now);
+
+            match duplicate_decision {
+                AccessDuplicateDecision::Duplicate { addr, msg_seq } => {
+                    info!(
+                        "BSC: duplicate access PDU (msg_seq={}) from [{}] — L2 ack only, SDU discarded",
+                        msg_seq,
+                        format_ms_address(&addr),
+                    );
+                    if event.ack_req {
+                        if let Err(e) = bsc.access_tx.send_bs_ack_order(
+                            event.cell,
+                            &addr,
+                            msg_seq,
+                            access_response_tx_time(&event),
+                            bsc.access_ack_deadline(&event),
+                        ) {
+                            warn!("BSC: failed to send BS Ack for duplicate access PDU: {}", e);
+                        }
+                    }
+                    return;
+                }
+                AccessDuplicateDecision::NewSdu => {}
+            }
+            // For new mobiles (mobile_idx=None), the MSG_SEQ will be marked
+            // after registration creates the MobileStation entry — see below.
+        }
+
+        if bsc.defer_access_for_identity(&event) {
+            return;
+        }
+        self.dispatch_access_event(bsc, event).await;
+    }
+
+    pub(crate) async fn dispatch_access_event(&mut self, bsc: &mut Bsc, event: AccessChannelEvent) {
+        match event.message_id {
+            MessageId::StatusResponse | MessageId::ExtStatusResponse => {
+                if let Some(addr) = bsc.extract_fwd_address(&event) {
+                    if event.ack_req
+                        && let Some(seq) = event.msg_seq
+                    {
+                        if bsc.access_identity.is_pending(&addr, event.cell) {
+                            bsc.access_tx.hold_bs_ack_order(
+                                event.cell,
+                                &addr,
+                                seq,
+                                access_response_tx_time(&event),
+                                bsc.access_ack_deadline(&event),
+                            );
+                        } else if let Err(error) = bsc.access_tx.send_bs_ack_order(
+                            event.cell,
+                            &addr,
+                            seq,
+                            access_response_tx_time(&event),
+                            bsc.access_ack_deadline(&event),
+                        ) {
+                            warn!("BSC: failed to acknowledge status response: {error}");
+                        }
+                    }
+                    if let Some(seq) = event.msg_seq {
+                        bsc.mobiles.update(&addr, |ms| ms.last_msg_seq = seq);
+                    }
+                    bsc.handle_meid_response(&addr, &event);
+                }
+            }
+            MessageId::Registration => {
+                let registered_addr = bsc.extract_fwd_address(&event);
+                self.handle_registration(bsc, &event);
+                if let Some(addr) = registered_addr {
+                    bsc.teardown_traffic_on_idle_registration(&addr).await;
+                    bsc.mobiles.update(&addr, |mobile| {
+                        mobile.registration_status = super::mobiles::RegistrationStatus::Pending;
+                    });
+                }
+                bsc.publish_mobiles();
+            }
+            MessageId::Order => {
+                self.handle_order(bsc, &event).await;
+                bsc.handle_access_identity_order(&event).await;
+            }
+            MessageId::DataBurst => {
+                self.handle_data_burst(bsc, &event);
+            }
+            MessageId::Origination => {
+                // Per C.S0005-E 2.6.5.1.8 / 3.6.5.1: the base station should
+                // treat an Origination Message as an implicit registration.
+                self.ensure_registered(bsc, &event);
+                self.handle_origination(bsc, &event).await;
+                bsc.publish_mobiles();
+            }
+            MessageId::PageResponse => {
+                // Per C.S0005-E 2.6.5.1.8 / 3.6.5.1: the base station should
+                // treat a Page Response Message as an implicit registration.
+                self.ensure_registered(bsc, &event);
+                self.handle_page_response(bsc, &event).await;
+                bsc.publish_mobiles();
+            }
+            MessageId::Reconnect => {
+                // Per C.S0005-E 2.6.5.1.8 / 3.6.5.1: the base station should
+                // treat a Reconnect Message as an implicit registration. ORIG_IND
+                // selects whether the message replaces Origination or Page Response.
+                self.ensure_registered(bsc, &event);
+                let orig_ind = matches!(
+                    event.decoded_l3.as_ref(),
+                    Some(AccessMessage::Reconnect(msg)) if msg.orig_ind
+                );
+                if orig_ind {
+                    self.handle_origination(bsc, &event).await;
+                } else {
+                    self.handle_page_response(bsc, &event).await;
+                }
+                bsc.publish_mobiles();
+            }
+            MessageId::CallRecoveryRequest => {
+                // C.S0005-E 3.6.3.5 handles Call Recovery Request in the same
+                // access-response family as Origination.
+                self.ensure_registered(bsc, &event);
+                self.handle_origination(bsc, &event).await;
+                bsc.publish_mobiles();
+            }
+            _ => {}
+        }
+    }
+
+    /// Ensure a mobile is registered (implicit registration per C.S0005-E 2.6.5.1.8).
+    /// Called for Origination, Page Response, Reconnect, and Call Recovery Request.
+    pub(crate) fn ensure_registered(&mut self, bsc: &mut Bsc, event: &AccessChannelEvent) {
+        let fwd_address = match bsc.extract_fwd_address(event) {
+            Some(addr) => addr,
+            None => {
+                warn!(
+                    "BSC: implicit registration from unknown address (no ESN or IMSI_S), ignoring"
+                );
+                return;
+            }
+        };
+
+        let mob_p_rev = event.mob_p_rev.unwrap_or(6);
+        let last_msg_seq = event.msg_seq.unwrap_or(0);
+        let slot_cycle_index = event.slot_cycle_index.unwrap_or(0);
+        let pgslot = compute_pgslot_from_event(event);
+
+        let cell_params = bsc.config.bts.params(event.cell);
+        let (imsi_mcc, imsi_11_12) =
+            resolve_imsi_overhead(event, cell_params.mcc, cell_params.imsi_11_12);
+        let activity_now = Instant::now();
+        let last_heard_ms = event_last_heard_ms(event);
+        let registration_imsi = bsc.derive_registration_imsi(event);
+
+        let fwd_address = self.apply_registration(
+            bsc,
+            event,
+            AccessRegistrationUpdate {
+                fwd_address,
+                registration_imsi,
+                imsi_mcc,
+                imsi_11_12,
+                mob_p_rev,
+                last_msg_seq,
+                slot_cycle_index,
+                pgslot,
+                activity_now,
+                last_heard_ms,
+                explicit_registration: false,
+            },
+        );
+
+        // Refresh the HLR binding on any access contact, since the traffic
+        // path never touches it.
+        bsc.resolve_subscriber_from_hlr(event, &fwd_address);
+    }
+
+    pub(crate) fn handle_registration(&mut self, bsc: &mut Bsc, event: &AccessChannelEvent) {
+        let fwd_address = match bsc.extract_fwd_address(event) {
+            Some(addr) => addr,
+            None => {
+                warn!("BSC: registration from unknown address (no ESN or IMSI_S), ignoring");
+                return;
+            }
+        };
+
+        let cell_params = bsc.config.bts.params(event.cell);
+        let (imsi_mcc, imsi_11_12) =
+            resolve_imsi_overhead(event, cell_params.mcc, cell_params.imsi_11_12);
+        let mob_p_rev = event.mob_p_rev.unwrap_or(6);
+        let last_msg_seq = event.msg_seq.unwrap_or(0);
+        let slot_cycle_index = event.slot_cycle_index.unwrap_or(0);
+        let pgslot = compute_pgslot_from_event(event);
+
+        info!(
+            "BSC: registering mobile addr={} mob_p_rev={} pgslot={:?} slot_cycle_index={}",
+            format_ms_address(&fwd_address),
+            mob_p_rev,
+            pgslot,
+            slot_cycle_index,
+        );
+
+        let activity_now = Instant::now();
+        let last_heard_ms = event_last_heard_ms(event);
+        let registration_imsi = bsc.derive_registration_imsi(event);
+
+        self.apply_registration(
+            bsc,
+            event,
+            AccessRegistrationUpdate {
+                fwd_address: fwd_address.clone(),
+                registration_imsi,
+                imsi_mcc,
+                imsi_11_12,
+                mob_p_rev,
+                last_msg_seq,
+                slot_cycle_index,
+                pgslot,
+                activity_now,
+                last_heard_ms,
+                explicit_registration: true,
+            },
+        );
+
+        // Resolve subscriber via HLR (async, fire-and-forget)
+        bsc.resolve_subscriber_from_hlr(event, &fwd_address);
+
+        if event.ack_req
+            && let Err(error) = bsc.access_tx.send_bs_ack_order(
+                event.cell,
+                &fwd_address,
+                last_msg_seq,
+                access_response_tx_time(event),
+                bsc.access_ack_deadline(event),
+            )
+        {
+            warn!("BSC: failed to acknowledge registration: {error}");
+        }
+    }
+
+    pub(crate) async fn handle_order(&mut self, bsc: &mut Bsc, event: &AccessChannelEvent) {
+        let fwd_address = match bsc.extract_fwd_address(event) {
+            Some(addr) => addr,
+            None => return,
+        };
+
+        info!(
+            "BSC: received Order from {} ack_req={} valid_ack={} ack_seq={:?} msg_seq={:?}",
+            format_ms_address(&fwd_address),
+            event.ack_req,
+            event.valid_ack,
+            event.ack_seq,
+            event.msg_seq,
+        );
+
+        if event.order_code == Some(super::ACKNOWLEDGMENT_ORDER_CODE) {
+            let last_msg_seq = event.msg_seq.unwrap_or(0);
+            if event.ack_req {
+                if let Err(e) = bsc.access_tx.send_bs_ack_order(
+                    event.cell,
+                    &fwd_address,
+                    last_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                ) {
+                    warn!("BSC: failed to send BS Ack for MS Ack Order: {}", e);
+                }
+            }
+            return;
+        }
+
+        let rejected_assignment = (event.order_code
+            == Some(reverse_order_code::MOBILE_STATION_REJECT))
+        .then(|| {
+            event.decoded_l3.as_ref().and_then(|message| match message {
+                AccessMessage::Order(order) => order.parse_mobile_station_reject_order(
+                    cdma_common::lac::message_types::WireChannel::ForwardCommon,
+                ),
+                _ => None,
+            })
+        })
+        .flatten()
+        .filter(|detail| {
+            [
+                MessageId::ChannelAssignment,
+                MessageId::ExtChannelAssignment,
+            ]
+            .into_iter()
+            .filter_map(|message_id| {
+                message_id.wire_type(cdma_common::lac::message_types::WireChannel::ForwardCommon)
+            })
+            .any(|wire_type| wire_type == detail.rejected_type)
+        });
+
+        // Other access-channel Orders have no Layer 3 response here, but
+        // still need L2 acknowledgment when the mobile requested one.
+        if event.ack_req {
+            let last_msg_seq = event.msg_seq.unwrap_or(0);
+            if let Err(e) = bsc.access_tx.send_bs_ack_order(
+                event.cell,
+                &fwd_address,
+                last_msg_seq,
+                access_response_tx_time(event),
+                bsc.access_ack_deadline(event),
+            ) {
+                warn!("BSC: failed to send BS Ack for order: {}", e);
+            }
+        }
+
+        if let Some(detail) = rejected_assignment {
+            let pending_walsh = bsc.mobiles.get(&fwd_address).and_then(|mobile| {
+                Some((
+                    mobile.serving_cell?,
+                    mobile.pending_traffic_assignment()?.walsh_code,
+                ))
+            });
+            if let Some((cell, walsh_code)) = pending_walsh {
+                warn!(
+                    "BSC: MS rejected traffic assignment on access channel for {} (REJECTED_TYPE=0x{:02x} ORDQ=0x{:02x}), tearing down walsh={}",
+                    format_ms_address(&fwd_address),
+                    detail.rejected_type,
+                    detail.ordq,
+                    walsh_code,
+                );
+                bsc.teardown_traffic_channel(cell, walsh_code).await;
+            } else {
+                info!(
+                    "BSC: MS rejected traffic assignment on access channel for {} without a pending traffic channel",
+                    format_ms_address(&fwd_address),
+                );
+            }
+            return;
+        }
+
+        if event.ack_req {
+            return;
+        }
+
+        // Per C.S0005-E §3.6.3.4: "No requirements" for other non-assured
+        // Orders on the access channel.
+        // Voice page consumption is handled exclusively by handle_page_response()
+        // per §3.6.3.3.
+        bsc.try_deliver_pending_sms_from_access(event, &fwd_address, "Order");
+    }
+
+    /// Handle a reverse Data Burst Message (MO SMS) on the access channel.
+    pub(crate) fn handle_data_burst(&mut self, bsc: &mut Bsc, event: &AccessChannelEvent) {
+        let burst_type = match event.burst_type {
+            Some(bt) => bt,
+            None => {
+                warn!("BSC: Data Burst without burst_type, ignoring");
+                return;
+            }
+        };
+        let fields = match event.data_burst_fields.as_ref() {
+            Some(f) => f,
+            None => {
+                warn!("BSC: Data Burst without payload, ignoring");
+                return;
+            }
+        };
+
+        // ACK the access message
+        if event.ack_req {
+            if let Some(ref fwd_address) = bsc.extract_fwd_address(event) {
+                let ack_seq = event.msg_seq.unwrap_or(0);
+                if let Err(e) = bsc.access_tx.send_bs_ack_order(
+                    event.cell,
+                    fwd_address,
+                    ack_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                ) {
+                    warn!("BSC: failed to ACK Data Burst: {}", e);
+                }
+            }
+        }
+
+        if burst_type == cdma_common::consts::BURST_TYPE_OTASP {
+            // C.S0016 OTASP / OTAPA payload. BSC is a transparent relay —
+            // it does not decode OTASP bytes. Forward to MSC via ADDS Transfer.
+            if let Some(ref fwd_address) = bsc.extract_fwd_address(event) {
+                bsc.forward_access_otasp_to_msc(fwd_address, fields);
+            } else {
+                warn!("BSC: OTASP access Data Burst with no forward address — dropped");
+            }
+            return;
+        }
+
+        if burst_type != cdma_common::consts::BURST_TYPE_SMS {
+            info!(
+                "BSC: received Data Burst burst_type={} (not SMS), ignoring",
+                burst_type
+            );
+            return;
+        }
+
+        info!(
+            "BSC: received MO SMS Data Burst ({} bytes) from {} on access channel",
+            fields.len(),
+            event.address.as_deref().unwrap_or("unknown")
+        );
+
+        let Some(fwd_addr) = bsc.extract_fwd_address(event) else {
+            warn!("BSC: MO SMS dropped — originating MS has no forward address");
+            return;
+        };
+        let (originating_number, originating_subscriber_id) = bsc
+            .mobiles
+            .resolve_originating_sms_sender(&fwd_addr)
+            .unwrap_or_default();
+
+        let Some(sms) = bsc.decode_reverse_sms(
+            fields,
+            &originating_number,
+            originating_subscriber_id,
+            "access",
+        ) else {
+            return;
+        };
+
+        bsc.route_decoded_mo_sms(&sms, &fwd_addr, fields, Some(event));
+    }
+
+    pub(crate) async fn handle_page_response(&mut self, bsc: &mut Bsc, event: &AccessChannelEvent) {
+        let fwd_address = bsc.extract_fwd_address(event);
+        info!(
+            "BSC: received Page Response from {}",
+            fwd_address
+                .as_ref()
+                .map(|a| format_ms_address(a))
+                .unwrap_or_else(|| "unknown".to_string())
+        );
+
+        bsc.mobiles
+            .mark_page_response_received(fwd_address.as_ref());
+
+        // If there's a pending page, take it and continue the corresponding flow.
+        // Otherwise, if the MS requested an ACK, send a standalone BS Ack Order
+        // so the MS stops retransmitting.
+        let pending_sms = fwd_address
+            .as_ref()
+            .and_then(|addr| bsc.paging.take_matching_sms_page_for_access(addr))
+            .or_else(|| {
+                fwd_address
+                    .is_none()
+                    .then(|| bsc.paging.take_sms_page())
+                    .flatten()
+            });
+        if let Some(pending) = pending_sms {
+            info!(
+                "BSC: page response received after {} retries ({:.0}ms elapsed) — delivering SMS",
+                pending.retry_count,
+                pending.started_at.elapsed().as_millis(),
+            );
+            let addr = fwd_address.unwrap_or_else(|| pending.fwd_address.clone());
+            let ack_msg_seq = event.msg_seq.unwrap_or(0);
+
+            if let Err(e) = bsc.sms.send_access_data_burst(
+                &bsc.access_tx,
+                event.cell,
+                &addr,
+                ack_msg_seq,
+                &pending.sms,
+                access_response_tx_time(event),
+                bsc.access_ack_deadline(event),
+            ) {
+                warn!("BSC: failed to send SMS data burst: {}", e);
+                bsc.mobiles.mark_registered(&addr);
+            }
+
+            // The directed Data Burst requested L2 acknowledgment. Keep the
+            // MS in PageResponseReceived until BTS reports the DBM result,
+            // then send the Release Order from handle_pch_transfer_ack.
+        } else if let Some(pending) = fwd_address
+            .as_ref()
+            .and_then(|addr| bsc.paging.take_voice_page_for_address(addr))
+            .or_else(|| {
+                fwd_address
+                    .is_none()
+                    .then(|| bsc.paging.take_voice_page())
+                    .flatten()
+            })
+        {
+            bsc.clear_pending_page_records_for(&pending.page_address);
+            info!(
+                "BSC: page response received after {} retries ({:.0}ms elapsed) — assigning voice traffic",
+                pending.retry_count,
+                pending.started_at.elapsed().as_millis(),
+            );
+            let addr = fwd_address.unwrap_or_else(|| pending.fwd_address.clone());
+            if bsc.mobiles.get(&addr).is_none() {
+                warn!(
+                    "BSC: voice page response from {} but no registered mobile matched",
+                    format_ms_address(&addr)
+                );
+                return;
+            }
+            if pending.a1_call_id.is_some() {
+                if bsc.handle_mt_page_response(event, &pending, &addr) {
+                    return;
+                }
+                warn!("BSC: A1 Paging Response path failed; call remains unassigned");
+                return;
+            }
+            let ack_msg_seq = event.msg_seq.unwrap_or(0);
+            if let Err(e) = bsc
+                .allocate_voice_channel_for_mobile(
+                    &addr,
+                    pending.service_option,
+                    None,
+                    1,
+                    ack_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                    Some(pending.session_id),
+                    Some(pending.leg_role),
+                    pending.a1_call_id,
+                )
+                .await
+            {
+                warn!(
+                    "BSC: failed to assign voice traffic after page response for {}: {}",
+                    format_ms_address(&addr),
+                    e
+                );
+            }
+        } else if event.ack_req {
+            // No pending SMS or voice — MS sent a Page Response but the BS
+            // has nothing to deliver. Send a BS Ack Order so the MS stops
+            // retransmitting, then return it to Registered (Idle equivalent).
+            if let Some(ref addr) = fwd_address {
+                let ack_msg_seq = event.msg_seq.unwrap_or(0);
+                info!(
+                    "BSC: sending BS Ack Order for Page Response retransmission (ack_seq={})",
+                    ack_msg_seq
+                );
+                if let Err(e) = bsc.access_tx.send_bs_ack_order(
+                    event.cell,
+                    addr,
+                    ack_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                ) {
+                    warn!("BSC: failed to send BS Ack for page response: {}", e);
+                }
+                bsc.mobiles.mark_registered(addr);
+            }
+        } else {
+            // No pending page, no ack requested — still transition back to
+            // Registered so the MS doesn't stay stuck in PageResponseReceived.
+            if let Some(ref addr) = fwd_address {
+                bsc.mobiles.mark_registered(addr);
+            }
+        }
+    }
+    pub(crate) async fn handle_origination(&mut self, bsc: &mut Bsc, event: &AccessChannelEvent) {
+        let fwd_address = match bsc.extract_fwd_address(event) {
+            Some(addr) => addr,
+            None => return,
+        };
+        let last_msg_seq = event.msg_seq.unwrap_or(0);
+
+        info!(
+            "BSC: received Origination from {} (service_option={:?})",
+            format_ms_address(&fwd_address),
+            event.service_option
+        );
+
+        // Update RC capabilities from the origination message (FCH capability record)
+        bsc.mobiles
+            .apply_origination_capabilities(&fwd_address, event);
+
+        let origination_digits = bsc
+            .decoded_origination(event)
+            .map(|msg| bsc.format_origination_digits(msg))
+            .unwrap_or_default();
+        let packet_sr_id = bsc
+            .decoded_origination(event)
+            .and_then(|msg| msg.sr_id)
+            .unwrap_or(1);
+        let requested_so = Some(packet_data_service_option_for_origination(
+            &origination_digits,
+            event.service_option,
+            bsc.mobiles
+                .get(&fwd_address)
+                .map(|ms| ms.mob_p_rev)
+                .unwrap_or_default(),
+        ));
+
+        if let Some(so) = requested_so {
+            if is_packet_data_so(so)
+                && (bsc.paging.pending_voice_page_for_address(&fwd_address)
+                    || bsc.voice.has_deferred_page_for_address(&fwd_address)
+                    || bsc
+                        .mobiles
+                        .get(&fwd_address)
+                        .and_then(|ms| ms.traffic_channel())
+                        .is_some_and(|tc| tc.voice_session_id.is_some()))
+            {
+                info!(
+                    "BSC: rejecting packet origination from {} while MT voice setup has priority",
+                    format_ms_address(&fwd_address)
+                );
+                if let Err(e) = bsc.access_tx.send_service_option_rejected_release(
+                    event.cell,
+                    &fwd_address,
+                    last_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                ) {
+                    warn!(
+                        "BSC: failed to reject packet origination during MT voice setup: {}",
+                        e
+                    );
+                }
+                return;
+            }
+            let a1_kind = if is_sms_traffic_service_option(so) {
+                if bsc
+                    .mobiles
+                    .get(&fwd_address)
+                    .and_then(|ms| ms.pending_traffic_assignment())
+                    .is_some()
+                    && bsc
+                        .try_assign_access_sms_traffic(&fwd_address, event, last_msg_seq)
+                        .await
+                {
+                    return;
+                }
+                Some(PendingA1AssignmentKind::SmsTraffic)
+            } else if is_packet_data_so(so) {
+                let pending_packet_call_id = bsc
+                    .mobiles
+                    .get(&fwd_address)
+                    .and_then(|ms| ms.pending_packet_traffic_assignment())
+                    .and_then(|tc| tc.a1_call_id);
+                if pending_packet_call_id.is_some()
+                    && bsc
+                        .try_assign_access_packet_data_traffic(
+                            &fwd_address,
+                            event,
+                            last_msg_seq,
+                            pending_packet_call_id,
+                        )
+                        .await
+                {
+                    return;
+                }
+                Some(PendingA1AssignmentKind::PacketData {
+                    service_ref_id: packet_sr_id,
+                })
+            } else {
+                None
+            };
+            if let Some(a1_kind) = a1_kind {
+                bsc.access_tx.hold_bs_ack_order(
+                    event.cell,
+                    &fwd_address,
+                    last_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                );
+                let called_number =
+                    (!origination_digits.is_empty()).then_some(origination_digits.as_str());
+                if bsc
+                    .send_complete_layer3_for_origination(
+                        &fwd_address,
+                        event,
+                        so,
+                        called_number,
+                        a1_kind,
+                    )
+                    .await
+                    .is_some()
+                {
+                    return;
+                }
+                warn!(
+                    "BSC: failed to send CLI3 for SO{} origination from {}; releasing access attempt",
+                    so,
+                    format_ms_address(&fwd_address)
+                );
+                if let Err(e) = bsc.access_tx.send_service_option_rejected_release(
+                    event.cell,
+                    &fwd_address,
+                    last_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                ) {
+                    warn!(
+                        "BSC: failed to send service-option rejection Release Order for SO{}: {}",
+                        so, e
+                    );
+                }
+                return;
+            }
+        }
+
+        // Voice service options - assign traffic channel for voice call.
+        'assign_voice_traffic: {
+            let so = match requested_so {
+                Some(so) => so,
+                None => break 'assign_voice_traffic,
+            };
+
+            if !is_supported_origination_service_option(so) {
+                info!(
+                    "BSC: rejecting unsupported Origination service option SO{} from {}",
+                    so,
+                    format_ms_address(&fwd_address)
+                );
+                if let Err(e) = bsc.access_tx.send_service_option_rejected_release(
+                    event.cell,
+                    &fwd_address,
+                    last_msg_seq,
+                    access_response_tx_time(event),
+                    bsc.access_ack_deadline(event),
+                ) {
+                    warn!(
+                        "BSC: failed to send service-option rejection Release Order for SO{}: {}",
+                        so, e
+                    );
+                }
+                return;
+            }
+
+            let (target_so, renegotiate_from_so) = (so, None);
+            if !is_voice_origination_service_option(target_so) {
+                break 'assign_voice_traffic;
+            }
+
+            if bsc.mobiles.get(&fwd_address).is_none() {
+                break 'assign_voice_traffic;
+            }
+
+            let digits = bsc
+                .decoded_origination(event)
+                .map(|msg| bsc.format_origination_digits(msg))
+                .unwrap_or_default();
+
+            let session_id =
+                bsc.start_msc_controlled_mo_session(&fwd_address, target_so, digits.clone());
+            bsc.access_tx.hold_bs_ack_order(
+                event.cell,
+                &fwd_address,
+                last_msg_seq,
+                access_response_tx_time(event),
+                bsc.access_ack_deadline(event),
+            );
+            let called_number = (!digits.is_empty()).then_some(digits.as_str());
+            if bsc
+                .send_complete_layer3_for_origination(
+                    &fwd_address,
+                    event,
+                    so,
+                    called_number,
+                    PendingA1AssignmentKind::Voice {
+                        session_id,
+                        leg_role: VoiceLegRole::Caller,
+                        renegotiate_from_so,
+                    },
+                )
+                .await
+                .is_some()
+            {
+                return;
+            }
+            warn!("BSC: failed to send CLI3 for MO call; clearing local MSC-controlled session");
+            bsc.voice
+                .retain_sessions(|session| session.id != session_id);
+            return;
+        }
+
+        // Default: send BS Ack Order for other unsupported service options
+        if let Err(e) = bsc.access_tx.send_bs_ack_order(
+            event.cell,
+            &fwd_address,
+            last_msg_seq,
+            access_response_tx_time(event),
+            bsc.access_ack_deadline(event),
+        ) {
+            warn!("BSC: failed to send BS Ack for origination: {}", e);
+            return;
+        }
+
+        // Per C.S0005-E §3.6.3.5: Origination gets its own channel assignment
+        // (MO call flow), but must NOT consume a pending voice *page*.
+        // Voice page consumption is handled exclusively by handle_page_response()
+        // per §3.6.3.3.
+        bsc.try_deliver_pending_sms_from_access(event, &fwd_address, "Origination");
+    }
+}
+
+fn is_supported_origination_service_option(so: u16) -> bool {
+    is_sms_traffic_service_option(so)
+        || is_packet_data_so(so)
+        || so == SERVICE_OPTION_BASIC_VOICE
+        || is_voice_origination_service_option(so)
+}
+
+fn is_sms_traffic_service_option(so: u16) -> bool {
+    matches!(so, 6 | 14)
+}
+
+fn is_voice_origination_service_option(so: u16) -> bool {
+    so == SERVICE_OPTION_BASIC_VOICE || VoiceCodec::from_service_option(so).is_some()
+}
+
+impl Bsc {
+    async fn teardown_traffic_on_idle_registration(&mut self, addr: &MsAddress) {
+        let Some((cell, walsh_code, call_id, clear_state, voice_session_id, voice_leg_role)) = self
+            .mobiles
+            .get(addr)
+            .and_then(|mobile| Some((mobile.serving_cell?, mobile.traffic_channel()?)))
+            .map(|(cell, traffic)| {
+                (
+                    cell,
+                    traffic.walsh_code,
+                    traffic.a1_call_id,
+                    traffic.a1_clear_state,
+                    traffic.voice_session_id,
+                    traffic.voice_leg_role,
+                )
+            })
+        else {
+            return;
+        };
+
+        warn!(
+            "BSC: explicit registration from {} while walsh={} is active, removing stale traffic session",
+            format_ms_address(addr),
+            walsh_code,
+        );
+        if let (Some(call_id), super::A1ClearState::Idle) = (call_id, clear_state) {
+            self.a1.send_clear_request(call_id, 0);
+            self.mobiles.update_tc(cell, walsh_code, |_, traffic| {
+                traffic.mark_a1_clear_request_sent();
+            });
+        }
+        self.teardown_traffic_channel(cell, walsh_code).await;
+        self.on_voice_leg_released(voice_session_id, voice_leg_role);
+    }
+
+    pub(crate) fn enrich_uplink_event(&self, mut event: AccessChannelEvent) -> AccessChannelEvent {
+        let matched_mobile = match (event.traffic_walsh_code, event.cell) {
+            // A traffic event names its channel by Walsh code, which is only
+            // unique within the cell that allocated it.
+            (Some(walsh_code), Some(cell)) => self.mobiles.get_by_walsh(cell, walsh_code),
+            (Some(_), None) => None,
+            (None, _) => self
+                .extract_fwd_address(&event)
+                .and_then(|addr| self.mobiles.get(&addr)),
+        };
+
+        if let Some(ms) = matched_mobile {
+            let resolved_address = format_ms_address(&ms.fwd_address);
+            if event.address.is_none() {
+                event.address = Some(resolved_address.clone());
+            }
+            event.resolved_address = Some(resolved_address);
+            event.subscriber_id = event
+                .subscriber_id
+                .or_else(|| ms.subscriber_id.map(|id| id.to_string()));
+            event.esn = event.esn.or(ms.esn);
+            if let Some((s1, s2)) = ms.imsi_s_components() {
+                event.imsi_m_s1 = event.imsi_m_s1.or(Some(s1));
+                event.imsi_m_s2 = event.imsi_m_s2.or(Some(s2));
+            }
+            event.mob_p_rev = event.mob_p_rev.or(Some(ms.mob_p_rev));
+            event.slot_cycle_index = event.slot_cycle_index.or(Some(ms.slot_cycle_index));
+        } else if event.resolved_address.is_none() {
+            event.resolved_address = self
+                .extract_fwd_address(&event)
+                .map(|addr| format_ms_address(&addr));
+        }
+
+        event
+    }
+
+    pub(crate) async fn handle_access_event(&mut self, event: AccessChannelEvent) {
+        if event.traffic_walsh_code.is_none() {
+            self.expire_access_identities(tokio::time::Instant::now())
+                .await;
+        }
+        let mut access_service = std::mem::take(&mut self.access_service);
+        access_service.handle_access_event(self, event).await;
+        self.access_service = access_service;
+    }
+}
+
+/// Convert an access/traffic event timestamp into the UI-facing last-heard time.
+pub(crate) fn event_last_heard_ms(event: &AccessChannelEvent) -> u64 {
+    event
+        .receive_time
+        .map(|t| t.timestamp_millis() as u64)
+        .unwrap_or_else(|| chrono::Utc::now().timestamp_millis() as u64)
+}
+
+/// Compute PGSLOT from the IMSI fields in an access event, if available.
+pub(crate) fn compute_pgslot_from_event(event: &AccessChannelEvent) -> Option<u16> {
+    if let (Some(s1), Some(s2)) = (event.imsi_m_s1, event.imsi_m_s2) {
+        Some(cdma_common::paging::compute_pgslot(s1, s2))
+    } else {
+        None
+    }
+}
+
+impl Bsc {
+    /// Build forward-link address from access event identity fields.
+    ///
+    /// Per C.S0005-E 2.6.2.2.5 and C.S0004-E 2.1.1.3.1.3: when a class-0
+    /// mobile omits MCC or IMSI_11_12 from the access message, it means
+    /// those values equal the current overhead parameters (MCC_S, IMSI_11_12_S).
+    /// We resolve `None` → overhead so the forward address always contains
+    /// the mobile's full identity.
+    pub(crate) fn extract_fwd_address(&self, event: &AccessChannelEvent) -> Option<MsAddress> {
+        if event.imsi_class == Some(0) {
+            if let (Some(s1), Some(s2)) = (event.imsi_m_s1, event.imsi_m_s2) {
+                let cell_params = self.config.bts.params(event.cell);
+                return Some(select_imsi_class0_forward_address(
+                    s1,
+                    s2,
+                    event.imsi_mcc,
+                    event.imsi_11_12,
+                    cell_params.mcc,
+                    cell_params.imsi_11_12,
+                ));
+            }
+            warn!("BSC: class-0 IMSI indicated but IMSI_S fields are missing for forward address");
+        }
+
+        if let Some(esn) = event.esn {
+            Some(MsAddress::Esn(esn))
+        } else if let (Some(s1), Some(s2)) = (event.imsi_m_s1, event.imsi_m_s2) {
+            Some(MsAddress::ImsiS {
+                imsi_m_s1: s1,
+                imsi_m_s2: s2,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+/// Resolve MCC and IMSI_11_12 from access event fields, falling back
+/// to overhead per C.S0005-E 2.6.2.2.5 when the mobile omits them.
+/// When the event provides IMSI_S (any class), omitted MCC/IMSI_11_12
+/// are assumed equal to overhead; this matches the behavior of
+/// `extract_page_address`.
+pub(crate) fn resolve_imsi_overhead(
+    event: &AccessChannelEvent,
+    overhead_mcc: u16,
+    overhead_imsi_11_12: u8,
+) -> (Option<u16>, Option<u8>) {
+    if event.imsi_m_s1.is_some() && event.imsi_m_s2.is_some() {
+        let mcc = Some(event.imsi_mcc.unwrap_or(overhead_mcc));
+        let imsi_11_12 = Some(event.imsi_11_12.unwrap_or(overhead_imsi_11_12));
+        (mcc, imsi_11_12)
+    } else {
+        (event.imsi_mcc, event.imsi_11_12)
+    }
+}
+
+/// Build page address from access event fields, resolving omitted
+/// MCC/IMSI_11_12 from overhead per C.S0005-E 2.6.2.2.5.
+///
+/// Used by the HLR binding path to extract an ESN fallback from
+/// the page identity.
+pub(crate) fn extract_page_address(
+    event: &AccessChannelEvent,
+    overhead_mcc: u16,
+    overhead_imsi_11_12: u8,
+) -> Option<MsPageAddress> {
+    if event.imsi_class == Some(0) {
+        if let (Some(s1), Some(s2)) = (event.imsi_m_s1, event.imsi_m_s2) {
+            return Some(MsPageAddress::ImsiS {
+                imsi_m_s1: s1,
+                imsi_m_s2: s2,
+                mcc: Some(event.imsi_mcc.unwrap_or(overhead_mcc)),
+                imsi_11_12: Some(event.imsi_11_12.unwrap_or(overhead_imsi_11_12)),
+            });
+        }
+        warn!("BSC: class-0 IMSI indicated but IMSI_S fields are missing for paging");
+    }
+
+    if event.imsi_class == Some(1) {
+        // Class-1 type 1 provides IMSI_S + MCC + IMSI_11_12 — page by IMSI.
+        // Class-1 type 0 also provides IMSI_S + IMSI_11_12 (MCC implied).
+        // Prefer IMSI_S paging when available; fall back to ESN.
+        if let (Some(s1), Some(s2)) = (event.imsi_m_s1, event.imsi_m_s2) {
+            return Some(MsPageAddress::ImsiS {
+                imsi_m_s1: s1,
+                imsi_m_s2: s2,
+                mcc: Some(event.imsi_mcc.unwrap_or(overhead_mcc)),
+                imsi_11_12: Some(event.imsi_11_12.unwrap_or(overhead_imsi_11_12)),
+            });
+        }
+        return event.esn.map(MsPageAddress::Esn).or_else(|| {
+            warn!("BSC: class-1 IMSI indicated but neither IMSI_S nor ESN available for paging");
+            None
+        });
+    }
+
+    if let (Some(s1), Some(s2)) = (event.imsi_m_s1, event.imsi_m_s2) {
+        Some(MsPageAddress::ImsiS {
+            imsi_m_s1: s1,
+            imsi_m_s2: s2,
+            mcc: Some(event.imsi_mcc.unwrap_or(overhead_mcc)),
+            imsi_11_12: Some(event.imsi_11_12.unwrap_or(overhead_imsi_11_12)),
+        })
+    } else if let Some(esn) = event.esn {
+        Some(MsPageAddress::Esn(esn))
+    } else {
+        warn!("BSC: no ESN or IMSI_S for GPM page address, MS is unpageable via GPM");
+        None
+    }
+}
+
+/// C.S0005-E Table 3.7.4-1: ORDER `011011` specifies Registration Accepted (ORDQ 0)
+/// and Registration Rejected (ORDQ `00000010`).
+const REGISTRATION_ORDER_CODE: u8 = 0b011011;
+const REGISTRATION_REJECTED_ORDQ: u8 = 0b0000_0010;
+
+/// Requested TX time for access-coupled responses.  Send as soon as
+/// possible — T56m (200 ms) is the *maximum* allowed BS response time,
+/// not a minimum delay.
+pub(crate) fn access_response_tx_time(
+    event: &AccessChannelEvent,
+) -> Option<cdma_common::time::CdmaSystemTime> {
+    event.receive_time
+}
+
+impl Bsc {
+    pub(crate) fn notify_msc_registration(
+        &self,
+        fwd_address: &MsAddress,
+        event: &AccessChannelEvent,
+        call_id: u64,
+    ) {
+        let registration_imsi = self.derive_registration_imsi(event);
+        let event_esn = event.esn;
+        let event_meid = event.meid.clone();
+        let slot_cycle_index = event
+            .slot_cycle_index
+            .or_else(|| {
+                self.mobiles
+                    .get(fwd_address)
+                    .map(|mobile| mobile.slot_cycle_index)
+            })
+            .map(cdma_ios::SlotCycleIndex);
+        let classmark_information_type_2 =
+            super::a1::build_a1_classmark_information_type_2_for_event(event, 0);
+        let esn_val = event_esn.or(match fwd_address {
+            MsAddress::Esn(e) => Some(*e),
+            _ => None,
+        });
+        let event_meid =
+            event_meid.or_else(|| self.mobiles.get(fwd_address).and_then(|ms| ms.meid.clone()));
+        let a1_client = self.a1.msc_client.clone();
+        let serving_cell = self.serving_params(fwd_address).cell;
+        let cell_id = cdma_ios::CellId {
+            cell: serving_cell.cell,
+            sector: serving_cell.sector,
+        };
+        let auth_ies = super::a1::A1GlobalChallengeIes::from_event(
+            event,
+            self.access_authentication_required(event),
+        );
+        tokio::spawn(async move {
+            let mobile_identity = registration_imsi
+                .map(cdma_ios::MobileIdentity::Imsi)
+                .or_else(|| esn_val.map(cdma_ios::MobileIdentity::Esn))
+                .unwrap_or_else(|| cdma_ios::MobileIdentity::Imsi("UNKNOWN".to_string()));
+            let lur = cdma_ios::LocationUpdatingRequestMessage {
+                mobile_identity_imsi: mobile_identity,
+                location_area_identification: None,
+                classmark_information_type_2: Some(classmark_information_type_2),
+                registration_type: None,
+                mobile_identity_esn: esn_val.map(cdma_ios::MobileIdentity::Esn),
+                mobile_identity_meid: event_meid
+                    .as_deref()
+                    .and_then(super::a1::meid_identity_from_hex),
+                slot_cycle_index,
+                authentication_response_parameter: auth_ies.response,
+                authentication_confirmation_parameter: auth_ies.randc,
+                authentication_parameter_count: auth_ies.count,
+                authentication_challenge_parameter: auth_ies.challenge,
+                authentication_event: auth_ies.event,
+                user_zone_id: None,
+                is2000_mobile_capabilities: None,
+            };
+            let l3 = match cdma_ios::Layer3Information::from_location_updating_request(&lur) {
+                Ok(l) => l,
+                Err(e) => {
+                    log::warn!("BSC: failed to encode LocationUpdatingRequest: {e}");
+                    return;
+                }
+            };
+            let cli3 = cdma_ios::CompleteLayer3InformationMessage {
+                cell_identifier: cell_id,
+                layer3_information: l3,
+            };
+            let payload = match cli3.encode() {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("BSC: failed to encode registration CLI3: {e}");
+                    return;
+                }
+            };
+            let msg = cdma_ios::EncodedA1Message::from_message_for_call(
+                &cdma_ios::Message::new(cdma_ios::MessageType::CompleteLayer3Information, payload),
+                Some(call_id),
+            );
+            if let Err(e) = a1_client.send_a1(msg).await {
+                log::warn!("BSC: failed to send registration notification to MSC: {e}");
+            }
+        });
+    }
+
+    pub(crate) fn access_ack_deadline(
+        &self,
+        event: &AccessChannelEvent,
+    ) -> Option<cdma_common::time::CdmaSystemTime> {
+        // T56m (200 ms) is the max time the MS monitors PCH after its probe.
+        // Use the full window — any artificial margin just causes the ECAM to
+        // be dropped before the MS stops listening, forcing unnecessary retries.
+        const T56M_MS: i64 = 200;
+        let deadline_ms = T56M_MS;
+        Some(event.receive_time? + ChronoDuration::milliseconds(deadline_ms))
+    }
+
+    pub(crate) fn decoded_origination<'a>(
+        &self,
+        event: &'a AccessChannelEvent,
+    ) -> Option<&'a OriginationMessage> {
+        match event.decoded_l3.as_ref()? {
+            AccessMessage::Origination(msg) => Some(msg),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn format_origination_digits(&self, msg: &OriginationMessage) -> String {
+        normalize_origination_called_number(&format_dtmf_digits(&msg.digits, msg.digit_mode))
+    }
+
+    pub(crate) fn resolve_subscriber_from_hlr(
+        &self,
+        event: &AccessChannelEvent,
+        fwd_address: &MsAddress,
+    ) {
+        let Some(ref hlr_repo) = self.config.hlr_repo else {
+            return;
+        };
+
+        let mobile = self.mobiles.get(fwd_address);
+        let esn = event.esn.or_else(|| mobile.and_then(|ms| ms.esn));
+        let meid = event
+            .meid
+            .clone()
+            .or_else(|| mobile.and_then(|ms| ms.meid.clone()));
+        let registration_imsi = self
+            .derive_registration_imsi(event)
+            .or_else(|| mobile.and_then(|ms| ms.imsi.clone()));
+        let identity_key = match cdma_hlr::model::MobileIdentityKey::from_parts(
+            registration_imsi.as_deref(),
+            esn,
+            meid.as_deref(),
+        ) {
+            Ok(identity_key) => identity_key,
+            Err(_) => {
+                debug!(
+                    "BSC: skipping HLR subscriber resolution for partial identity \
+                     (esn={:?}, imsi_present={}, meid_present={})",
+                    event.esn,
+                    registration_imsi.is_some(),
+                    event.meid.is_some(),
+                );
+                return;
+            }
+        };
+        if registration_imsi.is_none() && esn.is_none() {
+            log::error!(
+                "BSC: subscriber display lookup skipped, incomplete identity (esn={:?}, imsi_class={:?})",
+                event.esn,
+                event.imsi_class,
+            );
+            return;
+        }
+        let fwd_addr = fwd_address.clone();
+        let repo = hlr_repo.clone();
+        let result_tx = self.hlr_result_tx.clone();
+
+        tokio::spawn(async move {
+            let result = repo.resolve_by_identity(&identity_key).await;
+
+            let resolution = match result {
+                Ok(Some(resolved)) => {
+                    let sub_id = resolved.subscriber.subscriber_id;
+                    let phone = resolved.subscriber.phone_number.clone();
+                    let display_name = resolved.subscriber.display_name.clone();
+                    info!(
+                        "BSC: HLR resolved {} → subscriber {} ({})",
+                        format_ms_address(&fwd_addr),
+                        sub_id,
+                        phone,
+                    );
+
+                    let canonical_imsi = resolved
+                        .primary_identity
+                        .as_ref()
+                        .and_then(|identity| identity.imsi.clone());
+
+                    HlrResolution {
+                        fwd_address: fwd_addr,
+                        observed_esn: esn,
+                        observed_meid: meid.clone(),
+                        subscriber_id: Some(sub_id),
+                        phone_number: Some(phone),
+                        display_name: Some(display_name),
+                        canonical_imsi,
+                    }
+                }
+                Ok(None) => {
+                    debug!(
+                        "BSC: HLR has no subscriber for {}",
+                        format_ms_address(&fwd_addr),
+                    );
+                    HlrResolution {
+                        fwd_address: fwd_addr,
+                        observed_esn: esn,
+                        observed_meid: meid.clone(),
+                        subscriber_id: None,
+                        phone_number: None,
+                        display_name: None,
+                        canonical_imsi: None,
+                    }
+                }
+                Err(e) => {
+                    warn!("BSC: HLR resolve_by_identity failed: {}", e);
+                    HlrResolution {
+                        fwd_address: fwd_addr,
+                        observed_esn: esn,
+                        observed_meid: meid.clone(),
+                        subscriber_id: None,
+                        phone_number: None,
+                        display_name: None,
+                        canonical_imsi: None,
+                    }
+                }
+            };
+
+            let _ = result_tx.send(resolution).await;
+        });
+    }
+
+    /// Apply an HLR resolution result to the registered mobile.
+    pub(crate) fn apply_hlr_resolution(&mut self, resolution: HlrResolution) {
+        let matches_observed_identity =
+            self.mobiles.get(&resolution.fwd_address).is_some_and(|ms| {
+                ms.esn == resolution.observed_esn
+                    && match (ms.meid.as_deref(), resolution.observed_meid.as_deref()) {
+                        (Some(current), Some(observed)) => current.eq_ignore_ascii_case(observed),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            });
+        if !matches_observed_identity {
+            return;
+        }
+
+        if let (Some(sub_id), Some(phone)) = (resolution.subscriber_id, resolution.phone_number) {
+            if self.mobiles.apply_subscriber_resolution(
+                &resolution.fwd_address,
+                sub_id,
+                phone,
+                resolution.display_name,
+                resolution.canonical_imsi,
+            ) {
+                self.publish_mobiles();
+            }
+        }
+    }
+
+    pub(crate) fn restore_pending_page(&mut self, mut pending: PendingPage) {
+        self.mobiles.mark_page_pending(&pending.fwd_address);
+        pending.next_retry_at = self.compute_next_retry_at(
+            self.serving_cell(&pending.fwd_address),
+            pending.pgslot,
+            pending.slot_cycle_index,
+            pending.last_target_chip,
+        );
+        self.paging.restore_sms_page(pending);
+    }
+
+    /// If the MS we were paging is already active on the access channel for a
+    /// different reason, stop paging retries and try to deliver the pending SMS
+    /// directly after the normal response to that access message has been queued.
+    pub(crate) fn try_deliver_pending_sms_from_access(
+        &mut self,
+        event: &AccessChannelEvent,
+        fwd_address: &MsAddress,
+        trigger_name: &str,
+    ) -> bool {
+        let Some(pending) = self.paging.take_matching_sms_page_for_access(fwd_address) else {
+            return false;
+        };
+        let removed_pending = self.clear_pending_page_records_for(&pending.page_address);
+        self.mobiles.mark_registered(fwd_address);
+
+        info!(
+            "BSC: {} from {} while page pending after {} retries ({:.0}ms elapsed) — cancelling page and delivering SMS",
+            trigger_name,
+            format_ms_address(fwd_address),
+            pending.retry_count,
+            pending.started_at.elapsed().as_millis(),
+        );
+        if removed_pending > 0 {
+            info!(
+                "BSC: removed {} pending page record(s) for {} before direct SMS delivery",
+                removed_pending,
+                format_ms_address(fwd_address),
+            );
+        }
+        let ack_msg_seq = event.msg_seq.unwrap_or(0);
+        if let Err(e) = self.sms.send_access_data_burst(
+            &self.access_tx,
+            event.cell,
+            fwd_address,
+            ack_msg_seq,
+            &pending.sms,
+            access_response_tx_time(event),
+            self.access_ack_deadline(event),
+        ) {
+            warn!(
+                "BSC: failed to send SMS data burst after {} from {}: {}",
+                trigger_name,
+                format_ms_address(fwd_address),
+                e,
+            );
+            self.restore_pending_page(pending);
+        }
+        true
+    }
+}
+
+fn normalize_origination_called_number(digits: &str) -> String {
+    digits
+        .strip_prefix("011")
+        .filter(|rest| !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(|rest| format!("+{rest}"))
+        .unwrap_or_else(|| digits.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_origination_called_number;
+
+    #[test]
+    fn callback_international_access_prefix_becomes_international_number() {
+        assert_eq!(
+            normalize_origination_called_number("01112125550123"),
+            "+12125550123"
+        );
+    }
+
+    #[test]
+    fn leaves_local_and_service_digits_unchanged() {
+        assert_eq!(normalize_origination_called_number("5551234"), "5551234");
+        assert_eq!(normalize_origination_called_number("#777"), "#777");
+        assert_eq!(normalize_origination_called_number("011"), "011");
+    }
+}

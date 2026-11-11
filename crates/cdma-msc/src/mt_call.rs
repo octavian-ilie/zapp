@@ -1,0 +1,336 @@
+//! Mobile-terminated call handling for the MSC runtime.
+//!
+//! Owns MT call plans and the assignment-request flow triggered by paging
+//! responses.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use log::{info, warn};
+
+use cdma_common::consts::SERVICE_OPTION_REJECTED;
+use cdma_common::lac::paging_messages::CallingPartyNumberRecord;
+use cdma_hlr::repository::HlrRepository;
+use cdma_ios::{EncodedA1Message, MsInformationRecord, MsInformationRecords, VoiceBearerManager};
+
+use crate::call_control::{CallId, MscCallController};
+use crate::circuit::{CircuitService, CircuitSession, MscVoiceLeg};
+use crate::management::MtCallPlan;
+use crate::mo_call::MoCallService;
+use crate::runtime::MscA1Endpoint;
+
+/// Manages MT call plans and paging-response assignment flows.
+pub(crate) struct MtCallService {
+    /// Locally-staged MT call plans, keyed by A1 Tag.
+    pub(crate) mt_plans: HashMap<u32, MtCallPlan>,
+    /// Caller-ID digits per active MT call. Outlives `mt_plans`; read at
+    /// AssignmentComplete to build the AWI calling-party record.
+    pub(crate) caller_numbers: HashMap<CallId, String>,
+}
+
+fn resolve_assignment_service_option(
+    response_service_option: Option<u16>,
+    requested_service_option: Option<u16>,
+    default_voice_service_option: u16,
+) -> u16 {
+    if response_service_option == Some(SERVICE_OPTION_REJECTED) {
+        default_voice_service_option
+    } else {
+        response_service_option
+            .or(requested_service_option)
+            .unwrap_or(default_voice_service_option)
+    }
+}
+
+impl MtCallService {
+    pub(crate) fn new() -> Self {
+        Self {
+            mt_plans: HashMap::new(),
+            caller_numbers: HashMap::new(),
+        }
+    }
+
+    pub(crate) fn cleanup_call(&mut self, call_id: CallId) {
+        self.mt_plans.remove(&(call_id.0 as u32));
+        self.caller_numbers.remove(&call_id);
+    }
+
+    pub(crate) async fn send_assignment_request_for_paging_response(
+        &mut self,
+        a1: &dyn MscA1Endpoint,
+        call_id: CallId,
+        response: cdma_ios::PagingResponseMessage,
+        secondary_leg: bool,
+        controller: &mut MscCallController,
+        circuits: &mut CircuitService,
+        mo_call: &MoCallService,
+        voice_bearer: Option<&Arc<VoiceBearerManager>>,
+        default_voice_service_option: u16,
+        hlr_repo: &Arc<dyn HlrRepository>,
+        encryption_information: Option<cdma_ios::EncryptionInformation>,
+    ) {
+        let cic = circuits.assignment_circuit_identity_code_for_next_leg();
+        let tag_val = response.tag.map(|t| t.0).unwrap_or(call_id.0 as u32);
+        let mt_plan = if secondary_leg {
+            None
+        } else {
+            self.mt_plans.remove(&tag_val)
+        };
+        let caller_number = if secondary_leg {
+            mo_call.mo_calling_numbers.get(&call_id).cloned()
+        } else {
+            mt_plan.as_ref().and_then(|p| p.caller_number.clone())
+        };
+        if let Some(digits) = caller_number.as_ref() {
+            self.caller_numbers.insert(call_id, digits.clone());
+        }
+        let audio_file = mt_plan.as_ref().and_then(|p| p.audio_file.clone());
+        let requested_service_option =
+            mt_plan
+                .as_ref()
+                .map(|plan| plan.service_option)
+                .or_else(|| {
+                    circuits
+                        .paging_requests
+                        .get(&call_id)
+                        .and_then(|request| request.service_option)
+                        .map(|service_option| service_option.0)
+                });
+        let response_service_option = response
+            .service_option
+            .map(|service_option| service_option.0);
+        if response_service_option == Some(SERVICE_OPTION_REJECTED) {
+            info!(
+                "MSC: mobile rejected paged SO{:?} for call_id={}; selecting alternative SO{}",
+                requested_service_option, call_id.0, default_voice_service_option
+            );
+        }
+        let service_option = resolve_assignment_service_option(
+            response_service_option,
+            requested_service_option,
+            default_voice_service_option,
+        );
+
+        let packet_data = crate::runtime::is_packet_data_service_option(service_option);
+        let voice_bearer = voice_bearer.filter(|_| !packet_data);
+        let circuit_id = cic.to_packed();
+        circuits.insert_circuit_session(
+            circuit_id,
+            CircuitSession {
+                call_id,
+                audio_file,
+                service_option,
+                leg_role: if secondary_leg {
+                    MscVoiceLeg::Secondary
+                } else {
+                    MscVoiceLeg::Primary
+                },
+                peer_circuit_id: None,
+                bearer_remote_ready: voice_bearer.is_none(),
+                media_gateway_handle: controller
+                    .snapshot(call_id)
+                    .and_then(|snapshot| snapshot.media_gateway_handle),
+                called_number: None,
+            },
+        );
+        let leg_role = if secondary_leg {
+            MscVoiceLeg::Secondary
+        } else {
+            MscVoiceLeg::Primary
+        };
+        circuits.queue_assignment_complete_circuit(call_id, leg_role, circuit_id);
+
+        let a2p_bearer_session_params = if let Some(bearer) = voice_bearer {
+            match bearer.open_circuit(circuit_id, None).await {
+                Ok(local_addr) => Some(cdma_ios::A2pBearerSessionParams {
+                    ip_address: match local_addr.ip() {
+                        std::net::IpAddr::V4(v4) => v4,
+                        _ => std::net::Ipv4Addr::UNSPECIFIED,
+                    },
+                    udp_port: local_addr.port(),
+                }),
+                Err(e) => {
+                    warn!("MSC: failed to open bearer circuit {circuit_id}: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let a2p_bearer_format_params = a2p_bearer_session_params.as_ref().map(|_| {
+            cdma_ios::A2pBearerFormatParams::for_service_option_with_telephone_event(
+                cdma_ios::ServiceOption(service_option),
+                cdma_ios::voice_bearer::VOICE_RTP_PAYLOAD_TYPE,
+                cdma_ios::voice_bearer::TELEPHONE_EVENT_RTP_PAYLOAD_TYPE,
+            )
+            .unwrap_or_else(|| {
+                cdma_ios::A2pBearerFormatParams::evrc_with_telephone_event(
+                    cdma_ios::voice_bearer::EVRC_RTP_PAYLOAD_TYPE,
+                    cdma_ios::voice_bearer::TELEPHONE_EVENT_RTP_PAYLOAD_TYPE,
+                )
+            })
+        });
+        if let (Some(bearer), Some(format_params)) =
+            (voice_bearer, a2p_bearer_format_params.as_ref())
+        {
+            bearer.set_circuit_payload_types(
+                circuit_id,
+                cdma_ios::BearerPayloadTypes {
+                    voice: format_params.voice_payload_type().unwrap_or(
+                        cdma_ios::VoiceBearerPayloadType {
+                            format: cdma_ios::VoiceBearerFormat::Evrc,
+                            payload_type: cdma_ios::voice_bearer::EVRC_RTP_PAYLOAD_TYPE,
+                        },
+                    ),
+                    telephone_event: format_params.telephone_event_pt(),
+                },
+            );
+        }
+        let ms_information_records =
+            build_calling_party_ms_information_records(caller_number.as_deref(), hlr_repo).await;
+        let assignment_request = cdma_ios::AssignmentRequestMessage {
+            channel_type: crate::runtime::assignment_channel_type(service_option),
+            circuit_identity_code: if packet_data { None } else { Some(cic) },
+            encryption_information,
+            service_option: Some(cdma_ios::ServiceOption(service_option)),
+            signals: Vec::new(),
+            ms_information_records,
+            priority: None,
+            paca_timestamp: None,
+            quality_of_service_parameters: None,
+            a2p_bearer_session_params,
+            a2p_bearer_format_params,
+        };
+        if secondary_leg {
+            if let Err(error) = circuits.apply_secondary_leg_from_bsc(
+                call_id,
+                &cdma_ios::ProcedureMessage::PagingResponse(response.clone()),
+            ) {
+                warn!(
+                    "MSC: failed to apply secondary-leg Paging Response: {:?}",
+                    error
+                );
+                circuits.cancel_assignment_complete_circuit(call_id, leg_role);
+                return;
+            }
+            if let Err(error) = circuits.apply_secondary_leg_from_msc(
+                call_id,
+                &cdma_ios::ProcedureMessage::AssignmentRequest(assignment_request.clone()),
+            ) {
+                warn!(
+                    "MSC: failed to apply secondary-leg Assignment Request: {:?}",
+                    error
+                );
+                circuits.cancel_assignment_complete_circuit(call_id, leg_role);
+                return;
+            }
+        } else if let Err(error) = controller.apply_from_msc(
+            call_id,
+            &cdma_ios::ProcedureMessage::AssignmentRequest(assignment_request.clone()),
+        ) {
+            warn!(
+                "MSC: failed to apply A1 Assignment Request state: {}",
+                error
+            );
+            circuits.cancel_assignment_complete_circuit(call_id, leg_role);
+            return;
+        }
+        let payload = match assignment_request.encode() {
+            Ok(payload) => payload,
+            Err(error) => {
+                warn!("MSC: failed to encode A1 Assignment Request: {}", error);
+                return;
+            }
+        };
+        info!(
+            "MSC: A1 tx AssignmentRequest call_id={} circuit_id={} leg={:?}",
+            call_id.0, circuit_id, circuits.circuits[&circuit_id].leg_role
+        );
+        if let Err(error) = a1
+            .send(EncodedA1Message::from_message_for_call(
+                &cdma_ios::Message::new(cdma_ios::MessageType::AssignmentRequest, payload),
+                Some(call_id.0),
+            ))
+            .await
+        {
+            warn!(
+                "MSC: failed to send A1 Assignment Request to BSC: {}",
+                error
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_assignment_service_option;
+    use cdma_common::consts::{
+        SERVICE_OPTION_EVRC_A, SERVICE_OPTION_QCELP13, SERVICE_OPTION_REJECTED,
+    };
+
+    #[test]
+    fn rejected_paged_service_option_selects_configured_alternative() {
+        assert_eq!(
+            resolve_assignment_service_option(
+                Some(SERVICE_OPTION_REJECTED),
+                Some(SERVICE_OPTION_EVRC_A),
+                SERVICE_OPTION_QCELP13,
+            ),
+            SERVICE_OPTION_QCELP13
+        );
+    }
+
+    #[test]
+    fn mobile_alternative_overrides_paged_service_option() {
+        assert_eq!(
+            resolve_assignment_service_option(
+                Some(SERVICE_OPTION_QCELP13),
+                Some(SERVICE_OPTION_EVRC_A),
+                SERVICE_OPTION_EVRC_A,
+            ),
+            SERVICE_OPTION_QCELP13
+        );
+    }
+}
+
+/// Build the A1 MS Information Records IE (IOS-A.S0014-D §4.2.55) carrying
+/// the AWIM Calling Party Number record (C.S0005-E §3.7.5.3). If the caller
+/// has a subscriber row in HLR, use their configured NUMBER_TYPE /
+/// NUMBER_PLAN; otherwise fall back to network-specific / ISDN-E.164.
+pub(crate) async fn build_calling_party_ms_information_records(
+    caller_number: Option<&str>,
+    hlr_repo: &Arc<dyn HlrRepository>,
+) -> Option<MsInformationRecords> {
+    const CALLING_PARTY_NUMBER_RECORD_TYPE: u8 = 0x03;
+    let digits: String = caller_number?
+        .chars()
+        .filter(|ch| ch.is_ascii_digit())
+        .take(15)
+        .collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let (number_type, number_plan, screening_indicator) =
+        match hlr_repo.get_subscriber_by_phone_number(&digits).await {
+            Ok(Some(r)) => (r.subscriber.number_type, r.subscriber.number_plan, 3),
+            Ok(None) => (Default::default(), Default::default(), 1),
+            Err(e) => {
+                warn!("MSC: HLR lookup for AWIM caller {:?} failed: {}", digits, e);
+                (Default::default(), Default::default(), 1)
+            }
+        };
+    let record = CallingPartyNumberRecord {
+        number_type: number_type.to_wire(),
+        number_plan: number_plan.to_wire(),
+        presentation_indicator: 0,
+        screening_indicator,
+        digits,
+    };
+    Some(MsInformationRecords {
+        records: vec![MsInformationRecord {
+            record_type: CALLING_PARTY_NUMBER_RECORD_TYPE,
+            content: record.encode_content_bytes(),
+        }],
+    })
+}

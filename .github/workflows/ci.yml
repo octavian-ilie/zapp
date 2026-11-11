@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUN_CAPTURE_TESTS: "false"
+
+jobs:
+  build-voice-latest-ubuntu:
+    # Ubuntu 26.04's GCC 15 catches compatibility issues in the bundled voice codecs.
+    name: Build voice codecs (Latest Ubuntu)
+    runs-on: ubuntu-26.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - name: Build native codecs
+        run: cargo build -p cdma-voice --all-targets --release --locked
+
+  rust:
+    name: Rust
+    runs-on: ubuntu-24.04
+    env:
+      CAPTURE_DOWNLOAD_TOKEN: ${{ secrets.CAPTURE_DOWNLOAD_TOKEN }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/.ghcup
+          sudo rm -rf /usr/share/swift
+          sudo rm -rf /usr/local/share/powershell
+          sudo rm -rf /usr/local/share/chromium
+          sudo rm -rf /usr/local/lib/node_modules
+          sudo rm -rf /opt/hostedtoolcache
+          sudo docker image prune -af || true
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            libclang-dev \
+            pkg-config \
+            protobuf-compiler \
+            libprotobuf-dev \
+            libboost-system-dev \
+            libssl-dev \
+            zstd \
+            libsoapysdr-dev \
+            soapysdr-tools \
+            libuhd-dev \
+            uhd-host \
+            libbladerf-dev \
+            bladerf \
+            liblimesuite-dev \
+            limesuite \
+            tshark
+
+      - name: Load kernel SCTP
+        run: |
+          sudo modprobe sctp || {
+            sudo apt-get install -y --no-install-recommends "linux-modules-extra-$(uname -r)"
+            sudo modprobe sctp
+          }
+
+      - name: Build libre from upstream
+        run: |
+          git clone --depth 1 --branch v4.6.0 https://github.com/baresip/re.git /tmp/re
+          cmake -S /tmp/re -B /tmp/re/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local
+          cmake --build /tmp/re/build -j"$(nproc)"
+          sudo cmake --install /tmp/re/build
+          sudo ldconfig
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch capture fixtures
+        if: env.RUN_CAPTURE_TESTS == 'true' && env.CAPTURE_DOWNLOAD_TOKEN != ''
+        run: test/capture/fetch-archive.sh
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --release -- -D warnings
+
+      - name: Clippy (kernel SCTP only)
+        run: cargo clippy -p cdma-sctp --no-default-features --all-targets --release -- -D warnings
+
+      - name: Test
+        env:
+          REQUIRE_TSHARK: "1"
+        run: cargo test --workspace --all-targets --release -- --skip capture_
+
+      - name: Capture tests
+        if: env.RUN_CAPTURE_TESTS == 'true' && env.CAPTURE_DOWNLOAD_TOKEN != ''
+        run: cargo test --workspace --all-targets --release capture_ -- --test-threads=1

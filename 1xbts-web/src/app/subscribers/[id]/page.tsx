@@ -1,0 +1,970 @@
+"use client";
+
+import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { esnManufacturer } from "@/lib/esn-manufacturer";
+import { formatEsn, formatMeid } from "@/lib/format";
+import { BaseStationLink } from "@/components/activity-links";
+import { useBaseStations } from "@/lib/use-base-stations";
+import { Card, Stat } from "@/components/card";
+import { RecentMessagesCard } from "@/components/recent-messages-card";
+import { RecentOtaspCard } from "@/components/recent-otasp-card";
+import { OtaspOverridesCard } from "@/components/otasp-overrides-card";
+import { AuthenticationCard } from "@/components/authentication-card";
+import { SubscriberAccessCard } from "@/components/subscriber-access-card";
+import { ImsiGenerateButton } from "@/components/imsi-generate-button";
+import { validateRingtoneFile } from "@/lib/validation";
+import { apiFetch, fieldErrorsOf, readApiJson } from "@/lib/api-client";
+import { ErrorNotice, ResultNotice, type ActionResult } from "@/components/error-notice";
+import {
+  NumberPlan,
+  NumberType,
+  type RegistrationBinding,
+  type Subscriber,
+  type SubscriberIdentity,
+} from "@/lib/proto/hlr/v1/service";
+import {
+  DEFAULT_NUMBER_PLAN,
+  DEFAULT_NUMBER_TYPE,
+  NUMBER_PLAN_OPTIONS,
+  NUMBER_TYPE_OPTIONS,
+  normalizeNumberPlan,
+  normalizeNumberType,
+} from "@/lib/subscriber-options";
+import {
+  IMSI_DIGITS,
+  PHONE_MAX_DIGITS,
+  validateImsi,
+  validateImei,
+  validateMeid,
+  validatePhoneNumber,
+} from "@/lib/validation";
+
+// Data Session card is hidden for now; set to true to bring it back.
+const SHOW_DATA_SESSION = false;
+
+type FieldErrors = {
+  phoneNumber?: string;
+  imsi?: string;
+  esn?: string;
+  meid?: string;
+  imei?: string;
+  callerNumber?: string;
+  form?: string;
+};
+
+const SERVER_FIELDS: Record<string, keyof FieldErrors> = {
+  phone_number: "phoneNumber",
+  phoneNumber: "phoneNumber",
+  imsi: "imsi",
+  esn: "esn",
+  meid: "meid",
+  imei: "imei",
+};
+
+type UiSubscriber = Omit<Subscriber, "status"> & { status: string };
+
+type SubscriberDetail = {
+  subscriber?: UiSubscriber;
+  identities: SubscriberIdentity[];
+  binding?: RegistrationBinding;
+  error?: string;
+};
+
+function formatTimestamp(
+  ts?: Date | string | { seconds: number; nanos: number } | undefined
+): string {
+  if (!ts) return "-";
+  if (ts instanceof Date || typeof ts === "string") {
+    const date = new Date(ts);
+    return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+  }
+  const millis = ts.seconds * 1000 + Math.floor(ts.nanos / 1_000_000);
+  const date = new Date(millis);
+  return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function formatBindingIdentity(binding?: RegistrationBinding): string {
+  if (!binding) return "-";
+  return [
+    binding.esn != null ? `ESN ${formatEsn(binding.esn)}` : null,
+    binding.meid ? `MEID ${formatMeid(binding.meid)}` : null,
+    binding.imsi ? `IMSI ${binding.imsi}` : null,
+  ]
+    .filter(Boolean)
+    .join(" / ") || "-";
+}
+
+export default function SubscriberDetailPage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const { id } = use(params);
+  const { nodes } = useBaseStations();
+  const router = useRouter();
+  const [detail, setDetail] = useState<SubscriberDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<unknown>(null);
+  const [saving, setSaving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
+  const [saveError, setSaveError] = useState<unknown>(null);
+  const deleteDialogRef = useRef<HTMLDialogElement>(null);
+  const [saveResult, setSaveResult] = useState<string | null>(null);
+  const [calling, setCalling] = useState(false);
+  const [callAudioFile, setCallAudioFile] = useState("");
+  const [callerNumber, setCallerNumber] = useState("");
+  const [callResult, setCallResult] = useState<ActionResult | null>(null);
+  const [startingData, setStartingData] = useState(false);
+  const [dataResult, setDataResult] = useState<ActionResult | null>(null);
+  const [dataSo, setDataSo] = useState(33);
+  const [ringtoneFile, setRingtoneFile] = useState<File | null>(null);
+  const [ringtoneBusy, setRingtoneBusy] = useState(false);
+  const [ringtoneResult, setRingtoneResult] = useState<ActionResult | null>(null);
+
+  const primaryIdentity = useMemo(
+    () =>
+      detail?.identities.find((identity) => identity.isPrimary) ??
+      detail?.identities?.[0],
+    [detail]
+  );
+
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [status, setStatus] = useState("active");
+  const [esnHex, setEsnHex] = useState("");
+  const [imsi, setImsi] = useState("");
+  const [meid, setMeid] = useState("");
+  const [imei, setImei] = useState("");
+  const [numberType, setNumberType] = useState<NumberType>(DEFAULT_NUMBER_TYPE);
+  const [numberPlan, setNumberPlan] = useState<NumberPlan>(DEFAULT_NUMBER_PLAN);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+
+  const clearFieldError = (field: keyof FieldErrors) =>
+    setFieldErrors((prev) => {
+      if (prev[field] === undefined && prev.form === undefined) return prev;
+      const next = { ...prev };
+      delete next[field];
+      delete next.form;
+      return next;
+    });
+
+  const fetchDetail = useCallback(async () => {
+    try {
+      const data = await apiFetch<SubscriberDetail>(
+        `/api/subscribers/${encodeURIComponent(id)}`,
+        undefined,
+        "load the subscriber",
+      );
+      setDetail(data);
+      setError(null);
+    } catch (err) {
+      setError(err);
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
+
+  useEffect(() => {
+    fetchDetail();
+  }, [fetchDetail]);
+
+  useEffect(() => {
+    const subscriber = detail?.subscriber;
+    if (!subscriber) return;
+    setPhoneNumber(subscriber.phoneNumber);
+    setDisplayName(subscriber.displayName || "");
+    setStatus(subscriber.status || "active");
+    setNumberType(normalizeNumberType(subscriber.numberType));
+    setNumberPlan(normalizeNumberPlan(subscriber.numberPlan));
+
+    setEsnHex(
+      primaryIdentity?.esn != null
+        ? (primaryIdentity.esn >>> 0).toString(16).toUpperCase().padStart(8, "0")
+        : ""
+    );
+    setImsi(primaryIdentity?.imsi ?? "");
+    setMeid(primaryIdentity?.meid ?? "");
+    setImei(primaryIdentity?.imei ?? "");
+  }, [detail, primaryIdentity]);
+
+  const handleSave = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSaveResult(null);
+    setSaveError(null);
+    setSaving(true);
+
+    try {
+      const normalizedPhoneNumber = phoneNumber.trim();
+      const normalizedEsn = esnHex.trim();
+      const normalizedImsi = imsi.trim();
+      const normalizedMeid = meid.trim().toLowerCase();
+      const normalizedImei = imei.trim();
+      const errors: FieldErrors = {};
+
+      const phoneCheck = validatePhoneNumber(normalizedPhoneNumber);
+      if (!phoneCheck.ok) errors.phoneNumber = phoneCheck.error;
+
+      let esnValue: number | undefined;
+      if (normalizedEsn) {
+        esnValue = parseInt(normalizedEsn, 16);
+        if (isNaN(esnValue)) errors.esn = "ESN must be valid hexadecimal";
+      }
+
+      if (normalizedImsi) {
+        const imsiCheck = validateImsi(normalizedImsi);
+        if (!imsiCheck.ok) errors.imsi = imsiCheck.error;
+      }
+
+      if (normalizedMeid) {
+        const meidCheck = validateMeid(normalizedMeid);
+        if (!meidCheck.ok) errors.meid = meidCheck.error;
+      }
+
+      if (normalizedImei) {
+        const imeiCheck = validateImei(normalizedImei);
+        if (!imeiCheck.ok) errors.imei = imeiCheck.error;
+      }
+
+      if (!errors.esn && !errors.imsi && !errors.meid) {
+        if (!normalizedImsi || (!normalizedEsn && !normalizedMeid)) {
+          errors.form = "Enter IMSI plus ESN or MEID";
+        }
+      }
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+      setFieldErrors({});
+
+      const body: Record<string, unknown> = {
+        phoneNumber: normalizedPhoneNumber,
+        displayName,
+        status,
+        numberType,
+        numberPlan,
+      };
+      if (esnValue !== undefined) body.esn = esnValue;
+      if (normalizedImsi) body.imsi = normalizedImsi;
+      if (normalizedMeid) body.meid = normalizedMeid;
+      if (normalizedImei) body.imei = normalizedImei;
+
+      await apiFetch(
+        `/api/subscribers/${encodeURIComponent(id)}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        "save the subscriber",
+      );
+      setSaveError(null);
+      setSaveResult("Saved");
+      await fetchDetail();
+    } catch (err) {
+      setFieldErrors(fieldErrorsOf(err, SERVER_FIELDS));
+      setSaveError(err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!detail?.subscriber || deleting) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await apiFetch(
+        `/api/subscribers?id=${encodeURIComponent(detail.subscriber.subscriberId)}`,
+        { method: "DELETE" },
+        "delete the subscriber",
+      );
+      router.push("/subscribers");
+    } catch (err) {
+      setDeleteError(err);
+      setDeleting(false);
+    }
+  };
+
+  const handleCall = async () => {
+    if (!detail?.subscriber) return;
+    setCallResult(null);
+    const trimmedCaller = callerNumber.trim();
+    if (trimmedCaller) {
+      const check = validatePhoneNumber(trimmedCaller);
+      if (!check.ok) {
+        setFieldErrors((prev) => ({ ...prev, callerNumber: check.error }));
+        return;
+      }
+    }
+    setFieldErrors((prev) => {
+      if (prev.callerNumber === undefined) return prev;
+      const next = { ...prev };
+      delete next.callerNumber;
+      return next;
+    });
+    setCalling(true);
+    try {
+      await apiFetch(
+        "/api/calls",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            subscriberId: detail.subscriber.subscriberId,
+            audioFile: callAudioFile.trim() || undefined,
+            callerNumber: trimmedCaller || undefined,
+          }),
+        },
+        "place the call",
+      );
+      setCallResult({ ok: true, text: "Call requested. The handset is being paged." });
+    } catch (err) {
+      setCallResult({ ok: false, error: err });
+    } finally {
+      setCalling(false);
+    }
+  };
+
+  const handleRingtoneUpload = async () => {
+    if (!ringtoneFile) return;
+    const validation = validateRingtoneFile(ringtoneFile);
+    if (!validation.ok) {
+      setRingtoneResult({ ok: false, error: validation.error });
+      return;
+    }
+    setRingtoneBusy(true);
+    setRingtoneResult(null);
+    try {
+      const form = new FormData();
+      form.append("file", ringtoneFile);
+      const data = await apiFetch<{ codecs?: unknown[]; durationMs?: number }>(
+        `/api/subscribers/${encodeURIComponent(id)}/ringtone`,
+        { method: "POST", body: form },
+        "upload the ringtone",
+      );
+      setRingtoneResult({
+        ok: true,
+        text: `Uploaded (${data.codecs?.length ?? 0} codecs, ${(data.durationMs ?? 0) / 1000}s)`,
+      });
+      setRingtoneFile(null);
+      await fetchDetail();
+    } catch (err) {
+      setRingtoneResult({ ok: false, error: err });
+    } finally {
+      setRingtoneBusy(false);
+    }
+  };
+
+  const handleRingtoneClear = async () => {
+    setRingtoneBusy(true);
+    setRingtoneResult(null);
+    try {
+      const res = await fetch(`/api/subscribers/${encodeURIComponent(id)}/ringtone`, { method: "DELETE" });
+      if (res.status !== 204) await readApiJson(res, "remove the ringtone");
+      setRingtoneResult({ ok: true, text: "Removed" });
+      await fetchDetail();
+    } catch (err) {
+      setRingtoneResult({ ok: false, error: err });
+    } finally {
+      setRingtoneBusy(false);
+    }
+  };
+
+  const handleDataCall = async () => {
+    if (!detail?.subscriber) return;
+    setStartingData(true);
+    setDataResult(null);
+    try {
+      await apiFetch(
+        "/api/data-call",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            subscriberId: detail.subscriber.subscriberId,
+            serviceOption: dataSo,
+          }),
+        },
+        "start the data call",
+      );
+      setDataResult({ ok: true, text: "Data session requested. The handset is being paged." });
+    } catch (err) {
+      setDataResult({ ok: false, error: err });
+    } finally {
+      setStartingData(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="page-container text-sm text-muted">Loading...</div>;
+  }
+
+  if (error || !detail?.subscriber) {
+    return (
+      <div className="page-container space-y-4">
+        <Link
+          href="/subscribers"
+          className="text-sm text-muted hover:text-primary"
+        >
+          &larr; Subscribers
+        </Link>
+        <ErrorNotice error={error ?? "This subscriber does not exist or was deleted."} boxed onRetry={fetchDetail} />
+      </div>
+    );
+  }
+
+  const subscriber = detail.subscriber;
+  const binding = detail.binding;
+
+  return (
+    <div className="page-container space-y-6">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <Link
+            href="/subscribers"
+            className="text-sm text-muted hover:text-primary"
+          >
+            &larr; Subscribers
+          </Link>
+          <h1 className="text-lg font-bold font-mono mt-2">{subscriber.phoneNumber}</h1>
+          <div className="text-xs text-muted">
+            {subscriber.displayName || "Unnamed subscriber"}
+          </div>
+        </div>
+        <button
+          onClick={() => {
+            setDeleteError(null);
+            deleteDialogRef.current?.showModal();
+          }}
+          disabled={deleting}
+          className="text-xs px-3 py-1.5 rounded bg-accent-red-bg text-accent-red border border-accent-red/20 hover:bg-accent-red/15 disabled:opacity-50 transition-colors"
+        >
+          {deleting ? "Deleting..." : "Delete Subscriber"}
+        </button>
+      </div>
+
+      <dialog
+        ref={deleteDialogRef}
+        aria-labelledby="delete-subscriber-title"
+        aria-describedby="delete-subscriber-description"
+        onCancel={(event) => {
+          if (deleting) event.preventDefault();
+        }}
+        className="fixed inset-0 m-auto w-[calc(100%-2rem)] max-w-md rounded-xl border border-border bg-popover p-6 text-primary shadow-xl backdrop:bg-black/60"
+      >
+        <h2 id="delete-subscriber-title" className="text-lg font-semibold">Delete subscriber?</h2>
+        <p className="mt-3 text-sm text-secondary">
+          {subscriber.displayName ? `${subscriber.displayName} (${subscriber.phoneNumber})` : subscriber.phoneNumber}
+        </p>
+        <p id="delete-subscriber-description" className="mt-2 text-sm text-muted">
+          The subscriber and its configured identities will be permanently deleted. This cannot be undone.
+        </p>
+        <ErrorNotice error={deleteError} className="mt-3" />
+        <div className="mt-6 flex justify-end gap-3">
+          <button
+            type="button"
+            autoFocus
+            disabled={deleting}
+            onClick={() => deleteDialogRef.current?.close()}
+            className="rounded border border-border-input px-3 py-1.5 text-sm text-secondary hover:text-primary disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={deleting}
+            onClick={handleDelete}
+            className="rounded border border-accent-red/20 bg-accent-red-bg px-3 py-1.5 text-sm text-accent-red hover:bg-accent-red/15 disabled:opacity-50"
+          >
+            {deleting ? "Deleting..." : "Delete Subscriber"}
+          </button>
+        </div>
+      </dialog>
+
+      <Card title="Edit Subscriber">
+        <form onSubmit={handleSave} className="space-y-4" noValidate>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="edit-phone-number">
+                Phone Number
+              </label>
+              <input
+                id="edit-phone-number"
+                type="text"
+                value={phoneNumber}
+                onChange={(e) => {
+                  setPhoneNumber(e.target.value);
+                  clearFieldError("phoneNumber");
+                }}
+                inputMode="numeric"
+                maxLength={PHONE_MAX_DIGITS}
+                aria-invalid={!!fieldErrors.phoneNumber}
+                aria-describedby={
+                  fieldErrors.phoneNumber ? "edit-phone-number-error" : undefined
+                }
+                className="w-full glass-input font-mono"
+              />
+              {fieldErrors.phoneNumber && (
+                <p id="edit-phone-number-error" className="text-accent-red text-xs mt-1">
+                  {fieldErrors.phoneNumber}
+                </p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">Display Name</label>
+              <input
+                type="text"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                className="w-full glass-input"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">Status</label>
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                className="w-full glass-input"
+              >
+                <option value="active">active</option>
+                <option value="suspended">suspended</option>
+                <option value="disabled">disabled</option>
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="edit-esn">
+                ESN (hex)
+              </label>
+              <input
+                id="edit-esn"
+                type="text"
+                value={esnHex}
+                onChange={(e) => {
+                  setEsnHex(e.target.value);
+                  clearFieldError("esn");
+                }}
+                maxLength={8}
+                aria-invalid={!!fieldErrors.esn}
+                aria-describedby={fieldErrors.esn ? "edit-esn-error" : undefined}
+                className="w-full glass-input font-mono"
+              />
+              {fieldErrors.esn && (
+                <p id="edit-esn-error" className="text-accent-red text-xs mt-1">
+                  {fieldErrors.esn}
+                </p>
+              )}
+            </div>
+            <div>
+              <div className="flex items-end justify-between mb-1">
+                <label className="block text-xs text-muted" htmlFor="edit-imsi">
+                  IMSI
+                </label>
+                <ImsiGenerateButton
+                  phoneNumber={phoneNumber}
+                  onGenerated={(v) => {
+                    setImsi(v);
+                    clearFieldError("imsi");
+                  }}
+                />
+              </div>
+              <input
+                id="edit-imsi"
+                type="text"
+                value={imsi}
+                onChange={(e) => {
+                  setImsi(e.target.value);
+                  clearFieldError("imsi");
+                }}
+                inputMode="numeric"
+                maxLength={IMSI_DIGITS}
+                aria-invalid={!!fieldErrors.imsi}
+                aria-describedby={fieldErrors.imsi ? "edit-imsi-error" : undefined}
+                className="w-full glass-input font-mono"
+              />
+              {fieldErrors.imsi && (
+                <p id="edit-imsi-error" className="text-accent-red text-xs mt-1">
+                  {fieldErrors.imsi}
+                </p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="edit-meid">
+                MEID (hex)
+              </label>
+              <input
+                id="edit-meid"
+                type="text"
+                value={meid}
+                onChange={(e) => {
+                  setMeid(e.target.value);
+                  clearFieldError("meid");
+                }}
+                maxLength={14}
+                aria-invalid={!!fieldErrors.meid}
+                aria-describedby={fieldErrors.meid ? "edit-meid-error" : undefined}
+                className="w-full glass-input font-mono"
+              />
+              {fieldErrors.meid && (
+                <p id="edit-meid-error" className="text-accent-red text-xs mt-1">
+                  {fieldErrors.meid}
+                </p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="edit-imei">
+                IMEI (optional)
+              </label>
+              <input
+                id="edit-imei"
+                type="text"
+                inputMode="numeric"
+                value={imei}
+                onChange={(e) => {
+                  setImei(e.target.value);
+                  clearFieldError("imei");
+                }}
+                placeholder="990001242899516"
+                maxLength={15}
+                aria-invalid={!!fieldErrors.imei}
+                aria-describedby={fieldErrors.imei ? "edit-imei-error" : undefined}
+                className="w-full glass-input font-mono"
+              />
+              {fieldErrors.imei && (
+                <p id="edit-imei-error" className="text-accent-red text-xs mt-1">
+                  {fieldErrors.imei}
+                </p>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="edit-number-type">
+                Number Type
+              </label>
+              <select
+                id="edit-number-type"
+                value={numberType}
+                onChange={(e) => setNumberType(Number(e.target.value) as NumberType)}
+                className="w-full glass-input"
+              >
+                {NUMBER_TYPE_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="edit-number-plan">
+                Numbering Plan
+              </label>
+              <select
+                id="edit-number-plan"
+                value={numberPlan}
+                onChange={(e) => setNumberPlan(Number(e.target.value) as NumberPlan)}
+                className="w-full glass-input"
+              >
+                {NUMBER_PLAN_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {fieldErrors.form && <p className="text-xs text-accent-red">{fieldErrors.form}</p>}
+          <ErrorNotice error={saveError} className="text-xs" />
+          {saveResult && <p className="text-xs text-accent-green">{saveResult}</p>}
+
+          <button
+            type="submit"
+            disabled={saving}
+            className="text-xs px-4 py-1.5 rounded bg-accent-green-bg text-accent-green border border-accent-green/20 hover:bg-accent-green/15 disabled:opacity-50 transition-colors"
+          >
+            {saving ? "Saving..." : "Save Changes"}
+          </button>
+        </form>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <Card title="Subscriber">
+          <Stat label="Phone Number" value={subscriber.phoneNumber} mono />
+          <Stat label="Display Name" value={subscriber.displayName || "-"} />
+          <Stat label="Status" value={subscriber.status} />
+          <Stat label="Subscriber ID" value={subscriber.subscriberId} mono />
+          <Stat label="Created" value={formatTimestamp(subscriber.createdAt)} mono />
+          <Stat label="Updated" value={formatTimestamp(subscriber.updatedAt)} mono />
+        </Card>
+
+        <Card title="Registration Binding">
+          {binding ? (
+            <>
+              <Stat label="State" value={binding.state} />
+              <div className="flex justify-between gap-4 py-0.5">
+                <span className="text-muted text-sm shrink-0">Serving BS</span>
+                <span className="text-secondary text-sm font-mono">
+                  <BaseStationLink baseStation={binding.servingBsId} nodes={nodes} />
+                </span>
+              </div>
+              <Stat label="Identity" value={formatBindingIdentity(binding)} mono />
+              <Stat label="PGSLOT" value={binding.pgslot != null ? String(binding.pgslot) : "-"} mono />
+              <Stat
+                label="Slot Cycle Index"
+                value={
+                  binding.slotCycleIndex != null
+                    ? String(binding.slotCycleIndex)
+                    : "-"
+                }
+                mono
+              />
+              <Stat
+                label="Last MSG_SEQ"
+                value={binding.lastMsgSeq != null ? String(binding.lastMsgSeq) : "-"}
+                mono
+              />
+              <Stat label="Last Registered" value={formatTimestamp(binding.lastRegisteredAt)} mono />
+              <Stat label="Last Seen" value={formatTimestamp(binding.lastSeenAt)} mono />
+            </>
+          ) : (
+            <p className="text-sm text-muted">No active registration binding.</p>
+          )}
+        </Card>
+
+        <SubscriberAccessCard
+          subscriberId={subscriber.subscriberId}
+          identities={detail.identities}
+        />
+
+        <Card title={`Identities (${detail.identities.length})`}>
+          {detail.identities.length === 0 ? (
+            <p className="text-sm text-muted">No identities provisioned.</p>
+          ) : (
+            <div className="space-y-3">
+              {detail.identities.map((identity) => (
+                <div
+                  key={identity.subscriberIdentityId}
+                  className="rounded border border-border p-3 text-xs space-y-1"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-muted">
+                      {identity.subscriberIdentityId.slice(0, 8)}...
+                    </span>
+                    {identity.isPrimary && (
+                      <span className="rounded bg-badge-green-bg px-2 py-0.5 text-badge-green-text">
+                        Primary
+                      </span>
+                    )}
+                  </div>
+                  {identity.esn != null && (
+                    <div className="font-mono text-secondary">
+                      ESN {formatEsn(identity.esn)}
+                      {esnManufacturer(identity.esn) && (
+                        <span className="ml-2 text-muted font-sans">{esnManufacturer(identity.esn)}</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="font-mono text-secondary">
+                    IMSI {identity.imsi || "Not Available"}
+                  </div>
+                  {identity.meid && (
+                    <div className="font-mono text-secondary">
+                      MEID {formatMeid(identity.meid)}
+                    </div>
+                  )}
+                  {identity.imei && (
+                    <div className="font-mono text-secondary">IMEI {identity.imei}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      </div>
+
+      <RecentMessagesCard phone={subscriber.phoneNumber} />
+
+      <RecentOtaspCard subscriberId={subscriber.subscriberId} />
+
+      <AuthenticationCard subscriberId={subscriber.subscriberId} />
+
+      <OtaspOverridesCard
+        subscriberId={subscriber.subscriberId}
+        prlOverride={subscriber.prlOverrideId ?? undefined}
+        spc={subscriber.serviceProgrammingCode ?? undefined}
+        analogControlChannel={subscriber.firstchpOverride ?? undefined}
+        onChanged={fetchDetail}
+      />
+
+      <Card title="Voice Call">
+        <div className="space-y-4">
+          <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] gap-4 items-end">
+            <div>
+              <label className="block text-xs text-muted mb-1" htmlFor="caller-number">
+                Caller ID Number
+              </label>
+              <input
+                id="caller-number"
+                type="text"
+                value={callerNumber}
+                onChange={(e) => {
+                  setCallerNumber(e.target.value);
+                  setFieldErrors((prev) => {
+                    if (prev.callerNumber === undefined) return prev;
+                    const next = { ...prev };
+                    delete next.callerNumber;
+                    return next;
+                  });
+                }}
+                inputMode="numeric"
+                maxLength={PHONE_MAX_DIGITS}
+                placeholder="0000000000"
+                aria-invalid={!!fieldErrors.callerNumber}
+                aria-describedby={
+                  fieldErrors.callerNumber ? "caller-number-error" : undefined
+                }
+                className="w-full glass-input font-mono"
+              />
+              {fieldErrors.callerNumber && (
+                <p id="caller-number-error" className="text-accent-red text-xs mt-1">
+                  {fieldErrors.callerNumber}
+                </p>
+              )}
+            </div>
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                Optional WAV Override
+              </label>
+              <input
+                type="text"
+                value={callAudioFile}
+                onChange={(e) => setCallAudioFile(e.target.value)}
+                placeholder="Use server default when blank"
+                className="w-full glass-input font-mono"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleCall}
+              disabled={calling || !binding}
+              className="text-xs px-4 py-2 rounded bg-accent-blue hover:bg-accent-blue/80 text-primary disabled:opacity-50 transition-colors"
+            >
+              {calling ? "Calling..." : "Start Call"}
+            </button>
+          </div>
+          <p className="text-xs text-muted">
+            Places a BS-originated voice call to this subscriber. The subscriber must
+            have an active registration binding.
+          </p>
+          <ResultNotice result={callResult} />
+        </div>
+      </Card>
+
+      {/* Data Session card hidden for now. */}
+      {SHOW_DATA_SESSION && (
+        <Card title="Data Session">
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_auto] gap-4 items-end">
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                Service Option
+              </label>
+              <select
+                value={dataSo}
+                onChange={(e) => setDataSo(Number(e.target.value))}
+                className="w-full glass-input font-mono"
+              >
+                <option value={33}>SO 33 — High-Rate Packet (IS-707)</option>
+                <option value={12}>SO 12 — Asynchronous Data</option>
+                <option value={7}>SO 7 — Packet Data</option>
+              </select>
+            </div>
+            <button
+              type="button"
+              onClick={handleDataCall}
+              disabled={startingData || !binding}
+              className="text-xs px-4 py-2 rounded bg-accent-green-bg text-accent-green border border-accent-green/20 hover:bg-accent-green/15 disabled:opacity-50 transition-colors"
+            >
+              {startingData ? "Starting..." : "Start Data Session"}
+            </button>
+          </div>
+          <p className="text-xs text-muted">
+            Pages the mobile and assigns a traffic channel with the selected packet data
+            service option. RLP/PPP negotiation starts automatically on Service Connect.
+          </p>
+          <ResultNotice result={dataResult} />
+        </div>
+        </Card>
+      )}
+
+      <Card title="Custom Ringtone">
+        <div className="space-y-3">
+          {subscriber.hasRingtone ? (
+            <div className="text-xs space-y-1">
+              <div className="text-secondary">
+                A custom ringtone is stored
+                {subscriber.ringtoneDurationMs != null && (
+                  <span className="text-muted">
+                    {" "}
+                    ({(subscriber.ringtoneDurationMs / 1000).toFixed(1)}s)
+                  </span>
+                )}
+                .
+              </div>
+              <div className="text-muted">
+                Encoded for all supported codecs (EVRC-A, EVRC-B, EVRC-WB).
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-muted">
+              No custom ringtone uploaded. Default ringback tone will be played.
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-end gap-3">
+            <div>
+              <label className="block text-xs text-muted mb-1">
+                WAV File (max 4 MB)
+              </label>
+              <input
+                type="file"
+                accept=".wav,audio/wav,audio/x-wav"
+                onChange={(e) => setRingtoneFile(e.target.files?.[0] ?? null)}
+                className="text-xs"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleRingtoneUpload}
+              disabled={ringtoneBusy || !ringtoneFile}
+              className="text-xs px-4 py-2 rounded bg-accent-blue hover:bg-accent-blue/80 text-primary disabled:opacity-50 transition-colors"
+            >
+              {ringtoneBusy ? "Working..." : subscriber.hasRingtone ? "Replace" : "Upload"}
+            </button>
+            {subscriber.hasRingtone && (
+              <button
+                type="button"
+                onClick={handleRingtoneClear}
+                disabled={ringtoneBusy}
+                className="text-xs px-3 py-2 rounded bg-accent-red-bg text-accent-red border border-accent-red/20 hover:bg-accent-red/15 disabled:opacity-50 transition-colors"
+              >
+                Remove
+              </button>
+            )}
+          </div>
+          <ResultNotice result={ringtoneResult} />
+        </div>
+      </Card>
+
+
+    </div>
+  );
+}

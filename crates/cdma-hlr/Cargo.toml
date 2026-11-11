@@ -1,0 +1,44 @@
+[package]
+name = "cdma-hlr"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "PostgreSQL-backed HLR service and repository for 1xBTS."
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.13"
+prost = "0.13"
+prost-types = "0.13"
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+cdma-cave = { path = "../cdma-cave" }
+cdma-common = { path = "../cdma-common" }
+cdma-rpc-error = { path = "../cdma-rpc-error" }
+cdma-otasp = { path = "../cdma-otasp" }
+cdma-voice = { path = "../cdma-voice" }
+clap = { version = "4", features = ["derive"] }
+rand = "0.8"
+num-bigint = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+tonic-build = "0.13"
+
+[lib]
+path = "src/lib/mod.rs"
+
+[[bin]]
+name = "cdma-hlr"
+path = "src/main.rs"
+
+[lints]
+workspace = true

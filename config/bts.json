@@ -1,0 +1,279 @@
+{
+  "channel": {
+    "band_class": "bc0",
+    "band_subclass": 0,
+    "cdma_channel": 691
+  },
+  "pilot_offset": 0,
+  "sector": 1,
+  "iq_capture_dir": "captures",
+  "evdo": {
+    "enabled": false,
+    "channel": 630,
+    "advertise_on_1x": true,
+    "gain": 1.0,
+    "mode": "composite",
+    "a9": {
+      "pcf_addr": "127.0.0.1:5603",
+      "pcf_a8_addr": "127.0.0.1:17041",
+      "a8_bind_addr": "127.0.0.1:17040",
+      "a8_transport": "udp_encapsulated_gre"
+    },
+    "a12": {
+      "server": "127.0.0.1:1812",
+      "radius_secret": "secret"
+    },
+    "a21": {
+      "bind_addr": "127.0.0.1:17049",
+      "iws_addr": "127.0.0.1:4597"
+    },
+    "overhead": {
+      "sector_id": "00800580000000000000000000000000",
+      "subnet_mask": 26,
+      "color_code": 26,
+      "sector_signature": 1,
+      "access_signature": 1
+    }
+  },
+  "overhead": {
+    "sid": 22,
+    "nid": 65535,
+    "base_id": 1,
+    "reg_zone": 0,
+    "total_zones": 2,
+    "zone_timer": 0,
+    "max_slot_cycle_index": 0,
+    "page_chan": 1,
+    "config_seq": 5,
+    "acc_config_seq": 5,
+    "power_up_reg": true,
+    "parameter_reg": true,
+    "p_rev": 6,
+    "min_p_rev": 1,
+    "lp_sec": 18,
+    "ltm_off": -14,
+    "daylt": 0,
+    "prat": 0
+  },
+  "timezone": {
+    "source": "system"
+  },
+  "runtime": {
+    "spreading_rate": "sr1",
+    "orthogonal_code_length": 64,
+    "chip_rate_hz": 1228800,
+    "tx_lo_offset_hz": 200000,
+    "tx_digital_backoff": 0.3,
+    "block_size_chips": 512,
+    "tx_batch_chips": 6144,
+    "short_code_length_chips": 32768,
+    "downlink": {
+      "pilot": {
+        "walsh_code": 0
+      },
+      "sync": {
+        "walsh_code": 32,
+        "walsh_repetition": 4,
+        "data_rate_bps": 1200,
+        "symbol_repeat": 2,
+        "interleaver": {
+          "block_size": 128,
+          "m": 7,
+          "j": 1
+        },
+        "availability_max_size_bits": 32
+      },
+      "paging": {
+        "walsh_code": 1,
+        "paging_channel_number": 1,
+        "data_rate_bps": 9600,
+        "interleaver": {
+          "block_size": 384,
+          "m": 6,
+          "j": 6
+        },
+        "availability_max_size_bits": 96,
+        "message_defaults": {
+          "schedule": [
+            "system_parameters",
+            "access_parameters",
+            "neighbor_list",
+            "cdma_channel_list",
+            "extended_system_parameters"
+          ],
+          "system_parameters": {
+            "mult_sids": false,
+            "mult_nids": true,
+            "base_class": 0,
+            "home_reg": true,
+            "for_sid_reg": true,
+            "for_nid_reg": true,
+            "power_down_reg": false,
+            "reg_prd": 35,
+            "base_lat": 514084,
+            "base_long": 2012407,
+            "reg_dist": 0,
+            "srch_win_a": 6,
+            "srch_win_n": 8,
+            "srch_win_r": 9,
+            "nghbr_max_age": 0,
+            "pwr_rep_thresh": 2,
+            "pwr_rep_frames": 9,
+            "pwr_thresh_enable": true,
+            "pwr_period_enable": true,
+            "pwr_rep_delay": 2,
+            "rescan": false,
+            "t_add": 18,
+            "t_drop": 28,
+            "t_comp": 8,
+            "t_tdrop": 3,
+            "ext_sys_parameter": true,
+            "ext_nghbr_lst": false,
+            "gen_nghbr_lst": false,
+            "global_redirect": false,
+            "pri_nghbr_lst": false,
+            "user_zone_id": false,
+            "ext_global_redirect": false,
+            "ext_chan_lst": false
+          },
+          "extended_system_parameters": {
+            "delete_for_tmsi": false,
+            "use_tmsi": false,
+            "pref_msid_type": 3,
+            "ext_pref_msid_type": null,
+            "meid_reqd": null,
+            "mcc": "310",
+            "imsi_11_12": "55",
+            "tmsi_zone": [0],
+            "bcast_index": 0,
+            "imsi_t_supported": false,
+            "p_rev": 6,
+            "min_p_rev": 1,
+            "soft_slope": 16,
+            "add_intercept": 8,
+            "drop_intercept": 6,
+            "packet_zone_id": 0,
+            "max_num_alt_so": 0,
+            "reselect_included": false,
+            "pilot_report": false,
+            "nghbr_set_entry_info": false,
+            "nghbr_set_access_info": false,
+            "broadcast_gps_asst": false,
+            "qpch_supported": false,
+            "sdb_supported": false,
+            "rlgain_traffic_pilot": 0,
+            "rev_pwr_cntl_delay_incl": false,
+            "auto_msg_supported": false,
+            "mob_qos": false,
+            "enc_supported": false,
+            "use_sync_id": false,
+            "cs_supported": false,
+            "bcch_supported": false,
+            "ms_init_pos_loc_sup_ind": false,
+            "pilot_info_req_supported": false
+          },
+          "access_parameters": {
+            "acc_chan": 0,
+            "nom_pwr": -4,
+            "init_pwr": -4,
+            "pwr_step": 3,
+            "num_step": 3,
+            "max_cap_sz": 4,
+            "pam_sz": 5,
+            "psist_0_9": 0,
+            "psist_10": 0,
+            "psist_11": 0,
+            "psist_12": 0,
+            "psist_13": 0,
+            "psist_14": 0,
+            "psist_15": 0,
+            "msg_psist": 0,
+            "reg_psist": 0,
+            "probe_pn_ran": 0,
+            "acc_tmo": 3,
+            "probe_bkoff": 0,
+            "bkoff": 0,
+            "max_req_seq": 3,
+            "max_rsp_seq": 3,
+            "auth": 0,
+            "rand": 0,
+            "nom_pwr_ext": 0,
+            "psist_emg_incl": false,
+            "acct_incl": false
+          },
+          "neighbor_list": {
+            "pilot_inc": 4,
+            "neighbors": []
+          },
+          "extended_neighbor_list": {
+            "pilot_inc": 4,
+            "neighbors": []
+          },
+          "cdma_channel_list": {
+            "channels": []
+          },
+          "general_page": {
+            "class_0_done": true,
+            "class_1_done": true,
+            "tmsi_done": true,
+            "ordered_tmsis": false,
+            "broadcast_done": true,
+            "reserved": 0,
+            "add_pfield": [],
+            "page_records": []
+          },
+          "order": {
+            "order": 0,
+            "ordq": 0
+          }
+        }
+      }
+    },
+    "uplink": {
+      "access_channels_per_paging_channel": 1,
+      "access_channel_numbers": [0],
+      "access_channel_rate_bps": 4800,
+      "access_frame_ms": 20,
+      "require_r_csch_f_csch_arq_ack": true,
+      "arq_ack_timeout_ms": 400,
+      "reverse_access_finger_pool_size": 8,
+      "global_finger_pool_size": 1
+    },
+    "overhead": {
+      "fragment_availability_interval_chips": 32768,
+      "sync_superframe_interval_chips": 98304,
+      "t1b_ms": 1280,
+      "require_spm": true,
+      "require_apm": true,
+      "require_cclm": true,
+      "require_espm": true
+    },
+    "max_tx_lookahead_ms": 3,
+    "realtime": {
+      "enabled": true,
+      "tx_priority": 80,
+      "rx_priority": 75,
+      "driver_priority": 70,
+      "tx_cpu": null,
+      "rx_cpu": null,
+      "driver_cpu": null
+    }
+  },
+  "abis": {
+    "bind_addr": "127.0.0.1:5604",
+    "radio_link_loss_release": false
+  },
+  "management": {
+    "bind_addr": "127.0.0.1:17024"
+  },
+  "paging_retry": {
+    "ack_timeout_ms": 15000,
+    "max_retries": 0
+  },
+  "events_endpoint": "http://127.0.0.1:17023",
+  "hlr_endpoint": "http://127.0.0.1:17019",
+  "bearer": {
+    "bind_addr": "127.0.0.1:0",
+    "remote_addr": "127.0.0.1:17022"
+  }
+}

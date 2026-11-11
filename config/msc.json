@@ -1,0 +1,76 @@
+{
+  "mgmt_grpc_addr": "0.0.0.0:17017",
+  "hlr_endpoint": "http://127.0.0.1:17019",
+  "smsc_endpoint": "http://127.0.0.1:17020",
+  "packet_endpoint": "http://127.0.0.1:17021",
+  "pcf_endpoint": "http://127.0.0.1:17047",
+  "base_stations": [
+    { "id": "bts-1", "management_endpoint": "http://127.0.0.1:17016" }
+  ],
+  "authentication": {
+    "mode": "monitor",
+    "voice_privacy": "optional",
+    "count_update": "daily"
+  },
+  "access": {
+    "mode": "open",
+    "register_policy": "subscriber_only"
+  },
+  "voice": {
+    "gateway": {
+      "enabled": true,
+      "endpoint": "http://127.0.0.1:17015",
+      "fallback_to_wav": true
+    },
+    "sip_ringback_disable": false,
+    "generate_ringback": true,
+    "send_tones_alert": false,
+    "inbound_sip_msc_ringback": true,
+    "page_retry_cooldown_ms": 1000,
+    "page_retry_max_duration_ms": 60000,
+    "wav_file": "config/sample-sound.wav",
+    "media_ringback_enabled": true,
+    "media_ringback_type": "nanp",
+    "answer_delay_ms": 3000,
+    "voice_bearer_bind_ip": "127.0.0.1",
+    "supported_service_options": [32768, 3, 17, 68, 73]
+  },
+  "welcome_sms": {
+    "enabled": true,
+    "text": "Welcome! You are now connected to a live CDMA2000 1X base station. Enjoy your stay on the network.",
+    "originating_number": "0000",
+    "inactive_days_threshold": 30
+  },
+  "sms_retry": {
+    "enabled": true,
+    "retry_after_secs": 10,
+    "sweep_interval_secs": 10
+  },
+  "otasp": {
+    "enabled": true,
+    "feature_codes": ["*228"],
+    "spc_policy": "leave_default",
+    "system_tag": {
+      "name": "1xBTS",
+      "tag_p_rev": 1
+    },
+    "home_network": {
+      "sid": 22,
+      "nid": 65535
+    },
+    "nam_defaults": {
+      "mob_term_home": true,
+      "mob_term_for_sid": true,
+      "mob_term_for_nid": true
+    },
+    "writes": {
+      "cdma_analog_nam": false,
+      "mdn": false,
+      "cdma_nam": false,
+      "home_system_tag": false,
+      "mms_uri": false,
+      "prl": false,
+      "a_key": false
+    }
+  }
+}
