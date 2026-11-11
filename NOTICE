@@ -2,29 +2,78 @@ Zapp CDMA2000 / EV-DO
 Copyright 2026 Octavian Ilie
 
 This product includes original material licensed under the Apache License,
-Version 2.0. See the LICENSE file.
+Version 2.0. See LICENSES/Project-Zapp-LICENSE.txt.
 
 Project Zapp is an independent project. It is not affiliated with, endorsed
 by or a continuation of Telemobil S.A., OTE, Cosmote Romania, Telekom Romania
 or the Zapp commercial network.
 
 ------------------------------------------------------------------------------
-Third-party software
+Third-party software included in this repository
 ------------------------------------------------------------------------------
 
 1xBTS
   Project:   https://github.com/chrismoos/1xbts
-  Author:    Chris Moos and the 1xBTS contributors
-  License:   Apache License, Version 2.0
-  Status:    Not yet included in this repository.
+  Copyright: Copyright 2025-2026 Chris Moos
+  License:   Apache License, Version 2.0 (LICENSE, the upstream licence file)
+  Revision:  9897714153261b86913ef6c6b18e7f9a344ff4fe (2026-11-08)
 
-  When 1xBTS source is imported, it will keep its original LICENSE and
-  copyright notices. The exact upstream commit and any Project Zapp
-  modifications will be recorded here and next to the imported source.
-  Modified files will carry prominent notices stating that they were changed,
-  as Section 4(b) of the Apache License requires. Project Zapp does not claim
-  ownership of upstream contributions and does not relicense them.
+  The complete 1xBTS source tree at this revision is included without
+  modification, at its original paths. Project Zapp does not claim ownership
+  of upstream contributions and does not relicense them. SOURCE_ORIGIN.md
+  records the import.
 
-Components that 1xBTS bundles or depends on (for example under its external/
-directory) are subject to their own licences. They will be listed here, with
-their licence terms, when they are imported.
+The 1xBTS tree contains the following material, which carries its own terms.
+Those terms are not the Apache License and are not changed by it.
+
+Reference voice codecs (crates/cdma-voice/csrc/)
+  EVRC, EVRC-B/WB and QCELP-13K reference sources.
+  Copyright: Copyright (C) 1996 Lucent Technologies Incorporated
+             Copyright (C) 1997-1998 Telecommunications Industry Association
+             Copyright (C) 1999 Qualcomm Incorporated
+  Terms:     3GPP2 contribution notices by Lucent, Motorola, Nokia and
+             Qualcomm. The notices license the contributions to 3GPP2 and its
+             Organizational Partners, and state that a licence for the
+             software will be made available on reasonable and
+             non-discriminatory terms, which may include monetary
+             compensation. See the notice at the top of each file.
+
+TIA IS-96-A reference codec (crates/cdma-voice/csrc/tia96/)
+  Copyright: (C) Copyright 1993, QUALCOMM Incorporated
+  Terms:     The notice authorises reproduction and use only for the design
+             and development of North American Wideband CDMA Digital
+             Cellular Telephony Standards. See crates/cdma-voice/csrc/tia96/code/README.
+
+getopt (crates/cdma-voice/csrc/code/getopt.c, crates/cdma-voice/csrc/include/getopt.h)
+  Copyright: Copyright (C) 1987-1993 Free Software Foundation, Inc.
+  License:   GNU General Public License, version 2 or (at your option) any
+             later version
+
+HDML and HDTP specifications (crates/hdtp-gw/docs/hdml2.pdf, hdtp11.pdf)
+  Copyright: Copyright 1997 Unwired Planet, Inc. All rights reserved.
+  Terms:     Subject to the UP.SDK License Agreement, as stated in each
+             document.
+
+usrsctp (external/usrsctp)
+  Copyright: Copyright (c) 2015, Randall Stewart and Michael Tuexen,
+             and the other contributors named in its source files
+  License:   BSD 3-Clause License (external/usrsctp/LICENSE.md)
+
+Fredoka, Inter and JetBrains Mono fonts (crates/cdma-ms/assets/fonts)
+  Copyright: Copyright 2016 The Fredoka Project Authors
+             Copyright 2016 The Inter Project Authors
+             Copyright 2020 The JetBrains Mono Project Authors
+  License:   SIL Open Font License, Version 1.1
+             (crates/cdma-ms/assets/fonts/OFL-*.txt)
+
+Gradle Wrapper (sim/applet/gradle/wrapper/gradle-wrapper.jar)
+  License:   Apache License, Version 2.0 (bundled in the JAR as
+             META-INF/LICENSE)
+
+------------------------------------------------------------------------------
+Dependencies fetched at build time
+------------------------------------------------------------------------------
+
+Rust crates (Cargo.lock), JavaScript packages (1xbts-web/pnpm-lock.yaml) and
+Go modules (apps/speedtest/go.mod) are downloaded by their package managers
+and are not included in this repository. Each remains under its own licence.

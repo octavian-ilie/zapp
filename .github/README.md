@@ -2,10 +2,18 @@
 
 **An open-source restoration of Romania's historical Zapp CDMA mobile network.**
 
-> **Status: early development.** This repository currently contains project
-> documentation only. No part of the Zapp distribution is operational yet.
-> Functionality and handset compatibility will be documented only after they
-> have been implemented and tested.
+> **Status: early development.** Initial upstream audit completed. The
+> complete 1xBTS source is imported without modification. Full validation
+> pending.
+>
+> The network has not been run as a whole. Nothing has been verified over the
+> air or with handsets, and the Zapp distribution itself (installer, managed
+> services, Zapp Network Studio) does not exist yet. Functionality and handset
+> compatibility will be documented only after they have been implemented and
+> tested.
+
+This is Project Zapp's README. The `README.md` at the root of the repository
+is the original 1xBTS README, kept unmodified.
 
 ---
 
@@ -71,8 +79,9 @@ use the 3GPP family (GSM, UMTS, LTE, NR) that most European networks used.
 
 ## Objectives
 
-These are the project's goals. **None of them is implemented in this
-repository yet.**
+These are the project's goals. The imported 1xBTS stack is the starting point
+for the network infrastructure. **None of these goals is complete or
+verified as part of the Zapp distribution yet.**
 
 - **CDMA2000 1xRTT network infrastructure:** radio access and core network
   for voice, SMS and packet data.
@@ -135,34 +144,46 @@ developed by Chris Moos and its contributors.
 Upstream describes 1xBTS as experimental and intended for research,
 interoperability testing and lab use. It reports working 1x SMS, voice and
 packet data, plus initial experimental EV-DO Rev. 0 and Rev. A packet data.
-Project Zapp has **not yet** independently built, tested or verified these
-capabilities.
 
-The plan is to bring the relevant upstream source directly into this
-repository, so that the distribution is self-contained and does not rely on
-separately cloned upstream repositories. Each import will:
+The complete 1xBTS source at commit `9897714` (8 November 2026) is imported
+into this repository without modification, at its original paths. That
+includes every crate and network component, the reference voice codecs, the
+SIP voice gateway, the SIM applet, the test data and the CI workflow. Nothing
+is cloned from 1xBTS at build or install time. From here on, Project Zapp
+develops it independently, and keeps its own changes separate from this
+baseline. [`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md) records the import and how
+it was checked.
 
-- record the exact upstream commit it was taken from,
-- keep all upstream licences, copyright notices and attribution,
-- be built and tested as an unmodified baseline before any Zapp-specific
-  changes are made.
+Validation of the import is in progress. In a local Linux build without the
+SDR backends and the SIP voice gateway, which need further system libraries,
+the imported code compiles, passes the formatting and Clippy checks, and its
+automated tests give the same results as the same upstream revision built and
+tested the same way: 4,199 passed and 44 are ignored by upstream. One
+timing-sensitive upstream test, which also fails intermittently on the
+unmodified upstream source, failed in both runs. These are software tests
+(protocol state machines, synthetic and recorded signals), so they do not show
+that any capability works over the air. Full validation, including the SDR
+builds, the SIP voice gateway, the database-backed tests and upstream's CI on
+this repository, is pending.
 
-Third-party components remain under their own licences. See
-[`NOTICE`](NOTICE).
+Some files in the 1xBTS tree, including the reference voice codecs, are under
+their own terms rather than the Apache License. See [`NOTICE`](../NOTICE).
 
 ## Development status
 
 | Area | Status |
 | --- | --- |
 | Repository, licensing and documentation | In progress |
-| Upstream 1xBTS baseline (import, build, test) | Not started |
-| CDMA2000 1x network services | Not started |
-| EV-DO packet data | Not started |
-| Zapp Network Studio | Not started |
+| Upstream technical audit | Done: initial audit of 1xBTS `9897714` |
+| Upstream source import | Done: complete 1xBTS `9897714`, unmodified; full validation pending |
+| CDMA2000 1x network services | Imported from 1xBTS; software tests only, not verified with handsets |
+| Voice | Imported from 1xBTS, including the reference codecs; codec tests pass locally; SIP voice gateway not yet built or tested by Project Zapp |
+| EV-DO packet data | Imported from 1xBTS (experimental upstream); not verified |
+| Zapp Network Studio | Not started (the upstream dashboard is imported as `1xbts-web`) |
 | Installation and service management | Not started |
-| Diagnostics and simulation | Not started |
+| Diagnostics and simulation | Upstream simulation tools imported; not yet integrated |
 | Historical network profiles | Not started |
-| Automated testing and CI | Not started |
+| Automated testing and CI | Upstream CI workflow imported unmodified; not yet run for this repository |
 
 ## Roadmap
 
@@ -184,12 +205,39 @@ the upstream baseline is assessed.
 7. **Operations and quality.** Upgrade, backup and restore, CI, and
    documentation of supported hardware.
 
+## Building from source
+
+There is no installer yet. Install [Git LFS](https://git-lfs.com/) before
+cloning: test recordings, PRL test fixtures and the prebuilt SIM applet are
+stored with it.
+
+The prerequisites and node descriptions are in the original
+[1xBTS README](../README.md). A development build of the Rust workspace needs:
+- Rust 1.96.0, selected automatically by `rust-toolchain.toml`;
+- `protoc` (`protobuf-compiler`);
+- a C/C++ toolchain and `pkg-config`.
+
+The base station's SDR backends and the SIP voice gateway need further native
+libraries, listed in the 1xBTS README.
+
+To build without any radio hardware support or the SIP voice gateway:
+
+```sh
+cargo build --release --workspace \
+  --exclude cdma-bts --exclude cdma-nib \
+  --exclude cdma-voice-gw --exclude libre --exclude libre-sys
+cargo build --release -p cdma-bts -p cdma-nib --no-default-features
+```
+
 ## Documentation
 
-- [NOTICE](NOTICE): attribution and third-party licensing.
-
-Technical documentation will be added as components are implemented and
-verified.
+- [SOURCE_ORIGIN.md](../SOURCE_ORIGIN.md): imported revision and how the
+  import was checked.
+- [NOTICE](../NOTICE): attribution and third-party licensing.
+- [README.md](../README.md): the original 1xBTS documentation, including
+  prerequisites and node descriptions.
+- [docs/PORTS.md](../docs/PORTS.md): network ports used by the nodes (upstream
+  document).
 
 ## Responsible use
 
@@ -198,12 +246,16 @@ only where you are legally authorised to transmit, for example under an
 appropriate licence or inside a shielded test environment. Project Zapp does
 not provide or endorse operational frequency plans.
 
+The imported stack transmits as soon as a base station is started with a
+real SDR radio configured. The default configuration uses no radio.
+
 ## License
 
 Original Project Zapp material is licensed under the
-[Apache License, Version 2.0](LICENSE). Third-party components, including any
-source code derived from 1xBTS, remain under their respective licences and
-copyright notices.
+[Apache License, Version 2.0](../LICENSES/Project-Zapp-LICENSE.txt). The
+[`LICENSE`](../LICENSE) file at the root of the repository is the original
+1xBTS licence. 1xBTS and the other third-party components remain under their
+respective licences and copyright notices; see [`NOTICE`](../NOTICE).
 
 ## References
 
