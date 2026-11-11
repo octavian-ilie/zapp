@@ -1,0 +1,61 @@
+import type { AccessEvent, PagingEvent, TrafficEvent } from "@/lib/proto/bsc/v1/service";
+import type {
+  HrpdAccessEvent,
+  HrpdSessionEvent,
+  HrpdTrafficEvent,
+} from "@/lib/proto/events/v1/an";
+import type { A1LogEvent } from "@/lib/a1-event";
+
+export type LogEntry =
+  | { kind: "tx"; stream: "paging"; id: string; ts: number; identity: string; sortKey: string; event: PagingEvent; seenCount: number }
+  | { kind: "tx"; stream: "traffic"; id: string; ts: number; identity: string; sortKey: string; event: TrafficEvent; seenCount: number }
+  | { kind: "rx"; id: string; ts: number; identity: string; sortKey: string; event: AccessEvent; seenCount: number }
+  | { kind: "hrpd"; stream: "session"; id: string; ts: number; identity: string; sortKey: string; event: HrpdSessionEvent; seenCount: number }
+  | { kind: "hrpd"; stream: "access"; id: string; ts: number; identity: string; sortKey: string; event: HrpdAccessEvent; seenCount: number }
+  | { kind: "hrpd"; stream: "traffic"; id: string; ts: number; identity: string; sortKey: string; event: HrpdTrafficEvent; seenCount: number }
+  | { kind: "a1"; id: string; ts: number; identity: string; sortKey: string; event: A1LogEvent; seenCount: number };
+
+export function makeLogEntryId(kind: "tx" | "rx" | "hrpd" | "a1", ts: number): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${kind}-${ts}-${crypto.randomUUID()}`;
+  }
+  return `${kind}-${ts}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function makeSortKey(eventId: string | undefined, identity: string): string {
+  if (eventId) {
+    const parts = eventId.split("-");
+    const suffix = parts[parts.length - 1];
+    if (/^[0-9a-fA-F]+$/.test(suffix)) {
+      return suffix.toLowerCase();
+    }
+    return eventId;
+  }
+  return identity;
+}
+
+export function sortLogEntries(entries: LogEntry[], maxEntries: number): LogEntry[] {
+  return [...entries]
+    .sort((left, right) => {
+      if (left.ts !== right.ts) {
+        return right.ts - left.ts;
+      }
+      return right.sortKey.localeCompare(left.sortKey);
+    })
+    .slice(0, maxEntries);
+}
+
+export function formatTime(tsUs: number): string {
+  const tsMs = Math.floor(tsUs / 1000);
+  const us = tsUs % 1000;
+  const d = new Date(tsMs);
+  const Y = d.getFullYear();
+  const M = (d.getMonth() + 1).toString().padStart(2, "0");
+  const D = d.getDate().toString().padStart(2, "0");
+  const h = d.getHours().toString().padStart(2, "0");
+  const m = d.getMinutes().toString().padStart(2, "0");
+  const s = d.getSeconds().toString().padStart(2, "0");
+  const ms = d.getMilliseconds().toString().padStart(3, "0");
+  const usStr = us.toString().padStart(3, "0");
+  return `${Y}-${M}-${D} ${h}:${m}:${s}.${ms}${usStr}`;
+}

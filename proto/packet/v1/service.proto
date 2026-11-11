@@ -1,0 +1,169 @@
+syntax = "proto3";
+package packet.v1;
+
+// PDSN packet session status and trace capture.
+service PacketService {
+  // Returns detailed RLP/PPP/IP state for one packet session.
+  rpc GetSessionStatus(GetSessionStatusRequest) returns (GetSessionStatusResponse);
+  // Lists known packet sessions.
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  // Looks up one active packet session by its assigned mobile (peer) IP, for
+  // attributing inbound traffic to a subscriber. Returns the session summary,
+  // or an unset `session` field when no active session has that peer_ip.
+  rpc GetSessionByIp(GetSessionByIpRequest) returns (GetSessionByIpResponse);
+  // Enables or disables per-session packet trace capture.
+  rpc SetSessionCapture(SetSessionCaptureRequest) returns (SetSessionCaptureResponse);
+}
+
+// Radio access technology for a packet session.
+enum AccessTechnology {
+  ACCESS_TECHNOLOGY_UNSPECIFIED = 0;
+  ACCESS_TECHNOLOGY_CDMA_1X = 1;
+  ACCESS_TECHNOLOGY_HRPD = 2;
+}
+
+// Origin of the A11 MN ID used for bearer registration.
+enum MnIdSource {
+  MN_ID_SOURCE_UNSPECIFIED = 0;
+  MN_ID_SOURCE_A11 = 1;
+  MN_ID_SOURCE_DERIVED_HARDWARE = 2;
+}
+
+// Selects one packet session for status lookup.
+message GetSessionStatusRequest {
+  // Packet session identifier.
+  string session_id = 1;
+}
+
+// Detailed status lookup response for one packet session.
+message GetSessionStatusResponse {
+  // Session detail, omitted only if the implementation returns an error.
+  PacketSessionDetail session = 1;
+}
+
+// Request to list packet sessions.
+message ListSessionsRequest {}
+
+// Selects one packet session by its mobile-side IP address.
+message GetSessionByIpRequest {
+  // Mobile (peer) IP address as the engine reports it, e.g. "10.55.0.2".
+  string peer_ip = 1;
+}
+
+// Response carrying the matching session summary, if any.
+message GetSessionByIpResponse {
+  // Set when an active session matches `peer_ip`; unset on miss.
+  PacketSessionInfo session = 1;
+}
+
+// List of packet session summaries.
+message ListSessionsResponse {
+  // Session summaries sorted by implementation-defined recency.
+  repeated PacketSessionInfo sessions = 1;
+}
+
+// Enables or disables trace capture for one packet session.
+message SetSessionCaptureRequest {
+  // Packet session identifier.
+  string session_id = 1;
+  // True to retain trace events, false to stop capture.
+  bool enabled = 2;
+}
+
+// Response after changing packet trace capture state.
+message SetSessionCaptureResponse {
+  // Updated session detail.
+  PacketSessionDetail session = 1;
+}
+
+// Summary state for a packet data session.
+message PacketSessionInfo {
+  // Packet session identifier.
+  string session_id = 1;
+  // Packet engine phase such as setup, active, or closing.
+  string phase = 2;
+  // CDMA service option used for the session.
+  uint32 service_option = 3;
+  // Mobile-side IP address.
+  string peer_ip = 4;
+  // Network-side IP address.
+  string our_ip = 5;
+  // TUN device name when the session uses TUN transport.
+  string tun_device = 6;
+  uint64 uplink_frames = 10;
+  uint64 downlink_frames = 11;
+  uint64 uplink_bytes = 12;
+  uint64 downlink_bytes = 13;
+  uint64 created_at_ms = 14;
+  uint64 last_phase_change_at_ms = 15;
+  uint64 last_uplink_at_ms = 16;
+  uint64 last_downlink_at_ms = 17;
+  uint64 last_activity_at_ms = 18;
+  uint32 last_uplink_rate_bps = 19;
+  uint32 last_downlink_rate_bps = 20;
+  string mobile_address = 21;
+  string subscriber_id = 22;
+  string phone_number = 23;
+  uint32 traffic_walsh_code = 24;
+  string rlp_state = 25;
+  string lcp_state = 26;
+  string ipcp_state = 27;
+  bool capture_enabled = 28;
+  // Radio access technology for this packet session.
+  AccessTechnology access_technology = 29;
+  // IMSI associated with the packet session when known.
+  string imsi = 30;
+  // ESN associated with the packet session when known.
+  uint32 esn = 31;
+  // Mobile MEID when available.
+  string meid = 32;
+  // HRPD A11 MN ID used for bearer registration. This is not necessarily a
+  // subscriber IMSI.
+  string mn_id = 33;
+  // Origin of mn_id.
+  MnIdSource mn_id_source = 34;
+  // Authoritative subscriber IMSI when resolved.
+  string subscriber_imsi = 35;
+  // PCF Session ID, the A10 key from the A11 Session Specific Extension.
+  // Present only for a session registered over A11.
+  optional uint32 pcf_session_id = 36;
+  // MN Session Reference ID from the same extension.
+  optional uint32 mn_session_reference_id = 37;
+  // NAI from the mobile's Mobile IP Registration Request (MN-NAI extension,
+  // RFC 2794). Empty when the mobile sent none.
+  string nai = 38;
+}
+
+// One trace event emitted by PPP, RLP, IP transport, or capture code.
+message PacketTraceEvent {
+  // Unix timestamp in milliseconds.
+  uint64 timestamp_ms = 1;
+  // Protocol layer that emitted the event.
+  string layer = 2;
+  // Direction such as uplink or downlink.
+  string direction = 3;
+  // Short event summary for list displays.
+  string summary = 4;
+  // Longer diagnostic text.
+  string detail = 5;
+  // Optional payload bytes rendered as hex.
+  string payload_hex = 6;
+}
+
+// Detailed packet session status and recent trace events.
+message PacketSessionDetail {
+  // Basic session state and counters.
+  PacketSessionInfo summary = 1;
+  // Most recent inbound control frame summary.
+  string last_rx_control = 2;
+  // Most recent outbound control frame summary.
+  string last_tx_control = 3;
+  // Repeat count for the most recent inbound control frame.
+  uint64 last_rx_control_repeats = 4;
+  // Repeat count for the most recent outbound control frame.
+  uint64 last_tx_control_repeats = 5;
+  // Recent PPP/RLP/IP events retained even when capture is disabled.
+  repeated PacketTraceEvent recent_ppp_events = 6;
+  // Captured trace events retained while capture is enabled.
+  repeated PacketTraceEvent capture_events = 7;
+}

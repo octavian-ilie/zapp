@@ -1,0 +1,230 @@
+//! `cdma-pdsn` — PDSN node crate.
+//!
+//! PDSN node configuration, A11 signaling, and the A10 GRE bearer with IP
+//! allocation for packet-data sessions.
+
+pub mod a10_runtime;
+pub mod a11_agent;
+pub mod a11_service;
+pub mod config;
+pub mod events;
+pub mod node;
+pub mod session;
+
+use std::{
+    net::{SocketAddr, ToSocketAddrs},
+    sync::Arc,
+    time::Duration,
+};
+
+pub use a10_runtime::{PdsnA10Runtime, spawn_pdsn_a10_runtime};
+pub use a11_service::{PacketServicePdsnA10Adapter, spawn_pdsn_a11_service};
+pub use config::{PacketTransportConfig, PdsnNodeConfig};
+pub use node::{resolve_config_dir, run_node};
+pub use session::{
+    IpPool, PdsnError, PdsnEvent, PdsnSession, PdsnSessionManager, PdsnSessionPhase,
+    PdsnTimerPolicy, Result,
+};
+
+pub fn build_packet_service(
+    cfg: &PdsnNodeConfig,
+) -> std::result::Result<Arc<cdma_packet::grpc::PacketServiceImpl>, String> {
+    build_packet_service_with_sink(cfg, None)
+}
+
+/// Build the packet service with an optional lifecycle sink attached.
+/// The sink fires on session bind (after IP allocation) and unbind, and is
+/// what bridges packet-session lifecycle to the aggregated event bus.
+pub fn build_packet_service_with_sink(
+    cfg: &PdsnNodeConfig,
+    lifecycle_sink: Option<Arc<dyn cdma_packet::session_lifecycle::SessionLifecycleSink>>,
+) -> std::result::Result<Arc<cdma_packet::grpc::PacketServiceImpl>, String> {
+    let transport_config = packet_transport_config(&cfg.packet)?;
+    let allocator = Arc::new(
+        cdma_packet::ip_allocator::SubnetIpAllocator::new_with_packet_options(
+            cfg.packet.gateway_ip,
+            cfg.packet.primary_dns,
+            cfg.packet.secondary_dns,
+            cfg.packet.enable_uplink_vj_compression,
+            cfg.packet.enable_downlink_vj_compression,
+            cfg.packet
+                .mobile_ip
+                .to_packet_config(cfg.packet.primary_dns, cfg.packet.secondary_dns)?,
+        ),
+    );
+    let fou_tunnel = match &transport_config {
+        cdma_packet::ip_transport::IpTransportConfig::Fou {
+            remote_addr,
+            local_port,
+        } => {
+            let tunnel = cdma_packet::fou_transport::FouTunnel::new(*remote_addr, *local_port)
+                .map_err(|e| format!("failed to create FOU tunnel: {e}"))?;
+            Some(tunnel)
+        }
+        _ => None,
+    };
+    let fou_tcp_tunnel = match &transport_config {
+        cdma_packet::ip_transport::IpTransportConfig::FouTcp { remote_addr } => Some(
+            cdma_packet::fou_tcp_transport::FouTcpTunnel::new(*remote_addr),
+        ),
+        _ => None,
+    };
+    let mut service = cdma_packet::grpc::PacketServiceImpl::with_allocator(
+        transport_config,
+        fou_tunnel,
+        fou_tcp_tunnel,
+        allocator,
+    )
+    .with_ppp_session_cache(Duration::from_secs(cfg.ppp_session_timeout_secs));
+    if let Some(sink) = lifecycle_sink {
+        service = service.with_lifecycle_sink(sink);
+    }
+    Ok(Arc::new(service))
+}
+
+pub async fn run_packet_grpc_server(
+    addr: SocketAddr,
+    service: cdma_packet::grpc::PacketServiceImpl,
+) -> std::result::Result<(), tonic::transport::Error> {
+    tonic::transport::Server::builder()
+        .add_service(cdma_packet::proto::packet_service_server::PacketServiceServer::new(service))
+        .serve(addr)
+        .await
+}
+
+/// Serves the packet gRPC service on an already-bound listener, so the caller
+/// reports a bind failure with its cause before anything is spawned.
+pub async fn run_packet_grpc_server_on(
+    listener: tokio::net::TcpListener,
+    service: cdma_packet::grpc::PacketServiceImpl,
+) -> std::result::Result<(), tonic::transport::Error> {
+    tonic::transport::Server::builder()
+        .add_service(cdma_packet::proto::packet_service_server::PacketServiceServer::new(service))
+        .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+        .await
+}
+
+pub fn packet_grpc_endpoint(addr: SocketAddr) -> String {
+    format!("http://{addr}")
+}
+
+/// Spawns the packet gRPC server and returns the endpoint URI and a `JoinHandle`.
+///
+/// The caller should monitor the handle: if it completes the server has stopped,
+/// which is a fatal condition for the packet-data path.
+pub fn spawn_configured_packet_service(
+    cfg: &PdsnNodeConfig,
+) -> std::result::Result<(String, tokio::task::JoinHandle<()>), String> {
+    spawn_configured_packet_service_with_sink(cfg, None)
+}
+
+pub fn spawn_configured_packet_service_with_sink(
+    cfg: &PdsnNodeConfig,
+    lifecycle_sink: Option<Arc<dyn cdma_packet::session_lifecycle::SessionLifecycleSink>>,
+) -> std::result::Result<(String, tokio::task::JoinHandle<()>), String> {
+    let addr = cfg.packet_grpc_listen_addr;
+    let service = build_packet_service_with_sink(cfg, lifecycle_sink)?;
+    let handle = tokio::spawn(async move {
+        if let Err(error) = run_packet_grpc_server(addr, (*service).clone()).await {
+            log::error!("packet gRPC server error: {error}");
+        }
+    });
+    Ok((packet_grpc_endpoint(addr), handle))
+}
+
+fn packet_transport_config(
+    cfg: &PacketTransportConfig,
+) -> std::result::Result<cdma_packet::ip_transport::IpTransportConfig, String> {
+    cfg.validate()?;
+    match cfg.transport.as_str() {
+        "tun" => {
+            let nat_interface = cfg
+                .tun_nat_interface
+                .as_deref()
+                .map(str::trim)
+                .filter(|iface| !iface.is_empty())
+                .ok_or("pdsn.packet.tun_nat_interface is required when transport = \"tun\"")?;
+            Ok(cdma_packet::ip_transport::IpTransportConfig::Tun {
+                nat_interface: nat_interface.to_string(),
+            })
+        }
+        "fou" => {
+            let remote = cfg
+                .fou_remote
+                .as_ref()
+                .ok_or("pdsn.packet.fou_remote is required when transport = \"fou\"")?;
+            let addr = resolve_remote_endpoint(remote)?;
+            Ok(cdma_packet::ip_transport::IpTransportConfig::Fou {
+                remote_addr: addr,
+                local_port: cfg.fou_local_port,
+            })
+        }
+        "fou_tcp" => {
+            let remote = cfg
+                .fou_remote
+                .as_ref()
+                .ok_or("pdsn.packet.fou_remote is required when transport = \"fou_tcp\"")?;
+            let addr = resolve_remote_endpoint(remote)?;
+            Ok(cdma_packet::ip_transport::IpTransportConfig::FouTcp { remote_addr: addr })
+        }
+        other => Err(format!(
+            "unknown pdsn.packet.transport '{}' (expected \"tun\", \"fou\", or \"fou_tcp\")",
+            other
+        )),
+    }
+}
+
+fn resolve_remote_endpoint(remote: &str) -> std::result::Result<SocketAddr, String> {
+    remote
+        .to_socket_addrs()
+        .map_err(|error| format!("invalid pdsn.packet.fou_remote '{remote}': {error}"))?
+        .next()
+        .ok_or_else(|| format!("pdsn.packet.fou_remote '{remote}' resolved to no addresses"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packet_transport_config_maps_tun() {
+        let cfg = PacketTransportConfig {
+            transport: "tun".to_string(),
+            tun_nat_interface: Some("eth0".to_string()),
+            ..PacketTransportConfig::default()
+        };
+        let transport = packet_transport_config(&cfg).expect("transport config");
+        assert!(matches!(
+            transport,
+            cdma_packet::ip_transport::IpTransportConfig::Tun { .. }
+        ));
+    }
+
+    #[test]
+    fn packet_transport_config_maps_fou() {
+        let cfg = PacketTransportConfig {
+            transport: "fou".to_string(),
+            fou_remote: Some("127.0.0.1:17010".to_string()),
+            ..PacketTransportConfig::default()
+        };
+        let transport = packet_transport_config(&cfg).expect("transport config");
+        assert!(matches!(
+            transport,
+            cdma_packet::ip_transport::IpTransportConfig::Fou { .. }
+        ));
+    }
+
+    #[test]
+    fn packet_transport_config_maps_fou_tcp() {
+        let cfg = PacketTransportConfig {
+            transport: "fou_tcp".to_string(),
+            fou_remote: Some("127.0.0.1:17012".to_string()),
+            ..PacketTransportConfig::default()
+        };
+        let transport = packet_transport_config(&cfg).expect("transport config");
+        assert!(matches!(
+            transport,
+            cdma_packet::ip_transport::IpTransportConfig::FouTcp { .. }
+        ));
+    }
+}

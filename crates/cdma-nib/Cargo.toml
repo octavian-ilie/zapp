@@ -1,0 +1,35 @@
+[package]
+name = "cdma-nib"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Network-in-a-box launcher: builds every 1xBTS network element and runs each as a child process."
+
+[features]
+default = ["uhd-backend", "lime-backend", "bladerf-backend", "network-backend"]
+uhd-backend = ["cdma-bts/uhd-backend"]
+lime-backend = ["cdma-bts/lime-backend"]
+bladerf-backend = ["cdma-bts/bladerf-backend"]
+soapy-backend = ["cdma-bts/soapy-backend"]
+network-backend = ["cdma-bts/network-backend"]
+
+[dependencies]
+cdma-bts = { path = "../cdma-bts", default-features = false }
+cdma-common = { path = "../cdma-common" }
+cdma-bsc = { path = "../cdma-bsc" }
+cdma-events = { path = "../cdma-events" }
+cdma-hlr = { path = "../cdma-hlr" }
+cdma-msc = { path = "../cdma-msc" }
+cdma-pcf = { path = "../cdma-pcf" }
+cdma-pdsn = { path = "../cdma-pdsn" }
+cdma-smsc = { path = "../cdma-smsc" }
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+log = "0.4"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "signal", "sync", "time"] }
+
+[lints]
+workspace = true

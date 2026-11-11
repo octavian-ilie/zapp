@@ -1,0 +1,455 @@
+//! Circuit session management for the MSC runtime.
+//!
+//! Owns per-circuit metadata, assignment-complete correlation, secondary-leg
+//! procedure engines, and deferred paging responses.
+
+use std::collections::{HashMap, VecDeque};
+
+use cdma_ios::{ProcedureDirection, ProcedureEngine};
+
+use crate::call_control::CallId;
+
+/// Which voice leg a circuit belongs to within a multi-leg call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum MscVoiceLeg {
+    /// The first (originating or terminating) leg.
+    Primary,
+    /// The second leg added by a mobile-to-mobile page response.
+    Secondary,
+}
+
+/// Composite key identifying a single leg within a call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct MscLegKey {
+    pub(crate) call_id: CallId,
+    pub(crate) leg_role: MscVoiceLeg,
+}
+
+/// Per-circuit metadata tracked by the MSC.
+pub(crate) struct CircuitSession {
+    pub(crate) call_id: CallId,
+    pub(crate) audio_file: Option<String>,
+    pub(crate) service_option: u16,
+    pub(crate) leg_role: MscVoiceLeg,
+    pub(crate) peer_circuit_id: Option<u16>,
+    pub(crate) bearer_remote_ready: bool,
+    pub(crate) media_gateway_handle: Option<crate::media_gateway::CallHandle>,
+    /// Called party number for this leg, when known. Used to look up the
+    /// subscriber's custom ringtone for ringback playback.
+    pub(crate) called_number: Option<String>,
+}
+
+/// Caller and callee use separate A1 contexts so assignments can finish in either order.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct M2mCall {
+    pub(crate) caller: CallId,
+    pub(crate) callee: CallId,
+}
+
+impl M2mCall {
+    pub(crate) fn peer(self, call_id: CallId) -> CallId {
+        if call_id == self.caller {
+            self.callee
+        } else {
+            self.caller
+        }
+    }
+}
+
+/// A paging response waiting for the active assignment to finish.
+pub(crate) struct DeferredPagingResponse {
+    pub(crate) response: cdma_ios::PagingResponseMessage,
+}
+
+/// Manages circuit sessions, assignment correlation, leg procedures, and
+/// deferred paging responses.
+pub(crate) struct CircuitService {
+    /// Circuit ID -> session metadata, populated when AssignmentRequest is sent.
+    pub(crate) circuits: HashMap<u16, CircuitSession>,
+    /// Leg procedure engines for non-primary legs that share the same A1 call.
+    pub(crate) leg_procedures: HashMap<MscLegKey, ProcedureEngine>,
+    /// Leg -> AssignmentRequest circuit ID awaiting AssignmentComplete.
+    pub(crate) pending_assignment_completes: HashMap<MscLegKey, u16>,
+    /// Call ID -> currently outstanding assignment leg.
+    pub(crate) active_assignment_legs: HashMap<CallId, MscVoiceLeg>,
+    /// Additional responses sharing an A1 context wait for its active assignment.
+    pub(crate) deferred_paging_responses: HashMap<CallId, VecDeque<DeferredPagingResponse>>,
+    /// Independent A1 contexts belonging to one mobile-to-mobile conversation.
+    pub(crate) m2m_calls: HashMap<CallId, M2mCall>,
+    /// Initial Paging Request per MT call, reused to initialize per-leg A1 procedure engines.
+    pub(crate) paging_requests: HashMap<CallId, cdma_ios::PagingRequestMessage>,
+    /// Per-call retry counter for MT-leg AssignmentFailure-driven re-pages.
+    /// Reset on successful AssignmentComplete or call cleanup.
+    pub(crate) mt_assignment_failure_retries: HashMap<CallId, u8>,
+    voice_transcoders: HashMap<(u16, u16), std::sync::Mutex<cdma_voice::VoiceTranscoder>>,
+    /// Next circuit code to try. Codes are MSC-owned and unique among live
+    /// circuits, so two base stations never see the same CIC.
+    next_circuit_id: u16,
+}
+
+/// A packed 16-bit circuit code as the A1 Circuit Identity Code IE carries
+/// it: PCM multiplexer in the high 11 bits, timeslot in the low 5.
+pub(crate) fn circuit_identity_code_from_packed(packed: u16) -> cdma_ios::CircuitIdentityCode {
+    cdma_ios::CircuitIdentityCode {
+        pcm_multiplexer: (packed >> 5) & 0x07ff,
+        timeslot: (packed & 0x1f) as u8,
+    }
+}
+
+impl CircuitService {
+    pub(crate) fn new() -> Self {
+        Self {
+            circuits: HashMap::new(),
+            leg_procedures: HashMap::new(),
+            pending_assignment_completes: HashMap::new(),
+            active_assignment_legs: HashMap::new(),
+            deferred_paging_responses: HashMap::new(),
+            m2m_calls: HashMap::new(),
+            paging_requests: HashMap::new(),
+            mt_assignment_failure_retries: HashMap::new(),
+            voice_transcoders: HashMap::new(),
+            next_circuit_id: 1,
+        }
+    }
+
+    pub(crate) fn bridge_voice_frame(
+        &mut self,
+        source_circuit_id: u16,
+        target_circuit_id: u16,
+        source_codec: cdma_voice::VoiceCodec,
+        target_codec: cdma_voice::VoiceCodec,
+        frame: cdma_ios::VoiceBearerFrame,
+    ) -> Result<cdma_ios::VoiceBearerFrame, String> {
+        if source_codec == target_codec {
+            return Ok(cdma_ios::VoiceBearerFrame {
+                circuit_id: target_circuit_id,
+                rate_bps: frame.rate_bps,
+                payload: frame.payload,
+            });
+        }
+        let transcoder = match self
+            .voice_transcoders
+            .entry((source_circuit_id, target_circuit_id))
+        {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(std::sync::Mutex::new(cdma_voice::VoiceTranscoder::new(
+                    source_codec,
+                    target_codec,
+                )?))
+            }
+        };
+        let transcoded = transcoder
+            .get_mut()
+            .map_err(|_| "voice transcoder state is poisoned".to_string())?
+            .transcode(frame.rate_bps, &frame.payload)?;
+        Ok(cdma_ios::VoiceBearerFrame {
+            circuit_id: target_circuit_id,
+            rate_bps: transcoded.rate_bps,
+            payload: transcoded.payload,
+        })
+    }
+
+    pub(crate) fn bump_assignment_failure_retry(&mut self, call_id: CallId) -> u8 {
+        let entry = self
+            .mt_assignment_failure_retries
+            .entry(call_id)
+            .or_insert(0);
+        *entry += 1;
+        *entry
+    }
+
+    pub(crate) fn reset_assignment_failure_retries(&mut self, call_id: CallId) {
+        self.mt_assignment_failure_retries.remove(&call_id);
+    }
+
+    pub(crate) fn insert_circuit_session(&mut self, circuit_id: u16, mut session: CircuitSession) {
+        let peer_circuit_id = self
+            .circuits
+            .iter()
+            .find(|(cid, peer)| {
+                **cid != circuit_id
+                    && (peer.call_id == session.call_id
+                        || self
+                            .m2m_calls
+                            .get(&session.call_id)
+                            .is_some_and(|call| call.peer(session.call_id) == peer.call_id))
+                    && peer.peer_circuit_id.is_none()
+            })
+            .map(|(cid, _)| *cid);
+        if let Some(peer_circuit_id) = peer_circuit_id {
+            session.peer_circuit_id = Some(peer_circuit_id);
+            if let Some(peer) = self.circuits.get_mut(&peer_circuit_id) {
+                peer.peer_circuit_id = Some(circuit_id);
+            }
+        }
+        self.circuits.insert(circuit_id, session);
+    }
+
+    pub(crate) fn has_pending_assignment_complete(&self, call_id: CallId) -> bool {
+        self.active_assignment_legs.contains_key(&call_id)
+    }
+
+    /// Allocates the circuit for a call's next leg: the lowest code after the
+    /// previous allocation that no live or pending circuit holds.
+    pub(crate) fn assignment_circuit_identity_code_for_next_leg(
+        &mut self,
+    ) -> cdma_ios::CircuitIdentityCode {
+        loop {
+            let packed = self.next_circuit_id;
+            self.next_circuit_id = self.next_circuit_id.wrapping_add(1).max(1);
+            let in_use = self.circuits.contains_key(&packed)
+                || self
+                    .pending_assignment_completes
+                    .values()
+                    .any(|pending| *pending == packed);
+            if !in_use {
+                return circuit_identity_code_from_packed(packed);
+            }
+        }
+    }
+
+    pub(crate) fn queue_assignment_complete_circuit(
+        &mut self,
+        call_id: CallId,
+        leg_role: MscVoiceLeg,
+        circuit_id: u16,
+    ) {
+        let leg = MscLegKey { call_id, leg_role };
+        self.pending_assignment_completes.insert(leg, circuit_id);
+        self.active_assignment_legs.insert(call_id, leg_role);
+    }
+
+    pub(crate) fn cancel_assignment_complete_circuit(
+        &mut self,
+        call_id: CallId,
+        leg_role: MscVoiceLeg,
+    ) {
+        self.pending_assignment_completes
+            .remove(&MscLegKey { call_id, leg_role });
+        if self.active_assignment_legs.get(&call_id) == Some(&leg_role) {
+            self.active_assignment_legs.remove(&call_id);
+        }
+    }
+
+    pub(crate) fn assignment_complete_circuit(&mut self, call_id: CallId) -> Option<u16> {
+        let Some(leg_role) = self.active_assignment_legs.remove(&call_id) else {
+            return None;
+        };
+        let leg = MscLegKey { call_id, leg_role };
+        self.pending_assignment_completes.remove(&leg)
+    }
+
+    pub(crate) fn apply_secondary_leg_from_bsc(
+        &mut self,
+        call_id: CallId,
+        message: &cdma_ios::ProcedureMessage,
+    ) -> Result<cdma_ios::EngineEvent, cdma_ios::ProcedureError> {
+        let key = MscLegKey {
+            call_id,
+            leg_role: MscVoiceLeg::Secondary,
+        };
+        if !self.leg_procedures.contains_key(&key) {
+            let Some(paging_request) = self.paging_requests.get(&call_id).cloned() else {
+                return Err(cdma_ios::ProcedureError::InvalidTransition {
+                    procedure: "CallControl",
+                    state: "Idle",
+                    reason: "secondary leg has no originating Paging Request",
+                });
+            };
+            let mut engine = ProcedureEngine::new();
+            engine.apply(
+                ProcedureDirection::MscToBsc,
+                &cdma_ios::ProcedureMessage::PagingRequest(paging_request),
+            )?;
+            self.leg_procedures.insert(key, engine);
+        }
+        self.leg_procedures
+            .get_mut(&key)
+            .ok_or(cdma_ios::ProcedureError::InvalidTransition {
+                procedure: "secondary_leg",
+                state: "missing",
+                reason: "secondary leg procedure must exist",
+            })?
+            .apply(ProcedureDirection::BscToMsc, message)
+    }
+
+    pub(crate) fn apply_secondary_leg_from_msc(
+        &mut self,
+        call_id: CallId,
+        message: &cdma_ios::ProcedureMessage,
+    ) -> Result<cdma_ios::EngineEvent, cdma_ios::ProcedureError> {
+        let key = MscLegKey {
+            call_id,
+            leg_role: MscVoiceLeg::Secondary,
+        };
+        self.leg_procedures
+            .get_mut(&key)
+            .ok_or(cdma_ios::ProcedureError::InvalidTransition {
+                procedure: "secondary_leg",
+                state: "missing",
+                reason: "secondary leg procedure must exist before MSC-originated message",
+            })?
+            .apply(ProcedureDirection::MscToBsc, message)
+    }
+
+    /// Flush one deferred paging response for a call if no assignment is pending.
+    ///
+    /// Returns `Some(response)` if one was dequeued, `None` otherwise.
+    pub(crate) fn take_deferred_paging_response(
+        &mut self,
+        call_id: CallId,
+    ) -> Option<cdma_ios::PagingResponseMessage> {
+        if self.has_pending_assignment_complete(call_id) {
+            return None;
+        }
+        let response = self
+            .deferred_paging_responses
+            .get_mut(&call_id)
+            .and_then(|queue| queue.pop_front());
+        if self
+            .deferred_paging_responses
+            .get(&call_id)
+            .is_some_and(VecDeque::is_empty)
+        {
+            self.deferred_paging_responses.remove(&call_id);
+        }
+        response.map(|r| r.response)
+    }
+
+    /// Purge state for whichever leg of `call_id` has an outstanding
+    /// AssignmentRequest, inferred from `active_assignment_legs` (A1
+    /// AssignmentFailure carries no leg discriminator on the wire).
+    pub(crate) fn cancel_pending_assignment_leg(
+        &mut self,
+        call_id: CallId,
+        voice_bearer: Option<&std::sync::Arc<cdma_ios::VoiceBearerManager>>,
+    ) -> Option<(MscVoiceLeg, u16)> {
+        let leg_role = self.active_assignment_legs.remove(&call_id)?;
+        let key = MscLegKey { call_id, leg_role };
+        let pending_circuit = self.pending_assignment_completes.remove(&key);
+        if leg_role == MscVoiceLeg::Secondary {
+            self.leg_procedures.remove(&key);
+        }
+        let circuit_id = pending_circuit?;
+        if let Some(bearer) = voice_bearer {
+            bearer.close_circuit(circuit_id);
+        }
+        if let Some(session) = self.circuits.remove(&circuit_id)
+            && let Some(peer_id) = session.peer_circuit_id
+            && let Some(peer) = self.circuits.get_mut(&peer_id)
+        {
+            peer.peer_circuit_id = None;
+        }
+        self.voice_transcoders
+            .retain(|(source, target), _| *source != circuit_id && *target != circuit_id);
+        Some((leg_role, circuit_id))
+    }
+
+    /// Clean up all circuit state associated with a call.
+    pub(crate) fn cleanup_call(
+        &mut self,
+        call_id: CallId,
+        voice_bearer: Option<&std::sync::Arc<cdma_ios::VoiceBearerManager>>,
+    ) -> Vec<u16> {
+        self.pending_assignment_completes
+            .retain(|leg, _| leg.call_id != call_id);
+        self.active_assignment_legs.remove(&call_id);
+        self.deferred_paging_responses.remove(&call_id);
+        if let Some(call) = self.m2m_calls.remove(&call_id) {
+            self.m2m_calls.remove(&call.peer(call_id));
+        }
+        self.paging_requests.remove(&call_id);
+        self.leg_procedures.retain(|leg, _| leg.call_id != call_id);
+        self.mt_assignment_failure_retries.remove(&call_id);
+
+        let circuit_ids: Vec<u16> = self
+            .circuits
+            .iter()
+            .filter(|(_, s)| s.call_id == call_id)
+            .map(|(&cid, _)| cid)
+            .collect();
+        self.voice_transcoders.retain(|(source, target), _| {
+            !circuit_ids.contains(source) && !circuit_ids.contains(target)
+        });
+        for cid in &circuit_ids {
+            if let Some(bearer) = voice_bearer {
+                bearer.close_circuit(*cid);
+            }
+            if let Some(session) = self.circuits.remove(cid)
+                && let Some(peer_id) = session.peer_circuit_id
+                && let Some(peer) = self.circuits.get_mut(&peer_id)
+            {
+                peer.peer_circuit_id = None;
+            }
+        }
+        circuit_ids
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tone_frame() -> [i16; cdma_voice::SAMPLES_PER_FRAME] {
+        let mut pcm = [0i16; cdma_voice::SAMPLES_PER_FRAME];
+        for (index, sample) in pcm.iter_mut().enumerate() {
+            let angle = 2.0 * std::f64::consts::PI * 600.0 * index as f64 / 8_000.0;
+            *sample = (angle.sin() * 9_000.0) as i16;
+        }
+        pcm
+    }
+
+    #[test]
+    fn bridge_transcodes_evrc_to_qcelp_for_peer_circuit() {
+        let mut encoder =
+            cdma_voice::VoiceEncoder::new(cdma_voice::VoiceCodec::EvrcA).expect("EVRC encoder");
+        let (rate, payload) = encoder.encode(&tone_frame()).expect("encode EVRC");
+        let input = cdma_ios::VoiceBearerFrame {
+            circuit_id: 4,
+            rate_bps: cdma_voice::VoiceCodec::EvrcA.rate_bps(rate),
+            payload,
+        };
+        let mut circuits = CircuitService::new();
+        let output = circuits
+            .bridge_voice_frame(
+                4,
+                5,
+                cdma_voice::VoiceCodec::EvrcA,
+                cdma_voice::VoiceCodec::Qcelp13k,
+                input,
+            )
+            .expect("transcode M2M frame");
+
+        assert_eq!(output.circuit_id, 5);
+        let output_rate = cdma_voice::VoiceCodec::Qcelp13k
+            .rate_from_bps(output.rate_bps)
+            .expect("QCELP rate");
+        assert_eq!(
+            output.payload.len(),
+            cdma_voice::VoiceCodec::Qcelp13k.packet_data_bytes(output_rate)
+        );
+    }
+
+    #[test]
+    fn bridge_leaves_matching_codecs_encoded_once() {
+        let input = cdma_ios::VoiceBearerFrame {
+            circuit_id: 4,
+            rate_bps: 4_800,
+            payload: vec![0x5a; 10],
+        };
+        let mut circuits = CircuitService::new();
+        let output = circuits
+            .bridge_voice_frame(
+                4,
+                5,
+                cdma_voice::VoiceCodec::EvrcA,
+                cdma_voice::VoiceCodec::EvrcA,
+                input.clone(),
+            )
+            .expect("bridge matching codecs");
+        assert_eq!(output.circuit_id, 5);
+        assert_eq!(output.rate_bps, input.rate_bps);
+        assert_eq!(output.payload, input.payload);
+    }
+}

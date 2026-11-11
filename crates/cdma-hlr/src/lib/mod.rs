@@ -1,0 +1,30 @@
+pub mod auth;
+pub mod config;
+mod count_updates;
+pub mod key_exchange;
+pub mod model;
+pub mod node;
+pub mod prl_proto;
+pub mod repository;
+pub mod service;
+
+pub use config::HlrNodeConfig;
+pub use model::MobileSeenUpsert;
+pub use node::{resolve_config_dir, run_node};
+
+// Nested layout matches the proto package hierarchy so prost's
+// generated `super::super::events::v1` paths resolve.
+pub mod proto_root {
+    pub mod events {
+        pub mod v1 {
+            tonic::include_proto!("events.v1");
+        }
+    }
+    pub mod hlr {
+        pub mod v1 {
+            tonic::include_proto!("hlr.v1");
+        }
+    }
+}
+
+pub use proto_root::hlr::v1 as proto;

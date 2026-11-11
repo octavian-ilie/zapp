@@ -1,0 +1,45 @@
+{
+  "events_endpoint": "http://127.0.0.1:17023",
+  "traffic_assignment": {
+    "supported_for_rcs": [1, 2, 3],
+    "supported_rev_rcs": [1, 2, 3],
+    "preferred_pairs": [
+      { "for_rc": 3, "rev_rc": 3 }
+    ],
+    "idle_timeout_s": 15,
+    "ms_ack_timeout_ms": 5000,
+    "enable_f_sch": true,
+    "f_sch_rate_bps": 153600,
+    "rc12_rlgain_adj_db": -4,
+    "bypass_alert_answer": false,
+    "mt_alert_refresh_s": 50
+  },
+  "traffic_retry": {
+    "ack_timeout_ms": 3000,
+    "max_retries": 5
+  },
+  "voice_timeouts": {
+    "service_connect_timeout_ms": 20000,
+    "release_timeout_ms": 5000
+  },
+  "bts_peers": [
+    {
+      "oam_endpoint": "http://127.0.0.1:17024",
+      "abis_addr": "127.0.0.1:5604",
+      "bearer_bind_addr": "127.0.0.1:17022",
+      "bearer_remote_addr": "127.0.0.1:0"
+    }
+  ],
+  "a1_bind_addr": "127.0.0.1:14001",
+  "hlr_endpoint": "http://127.0.0.1:17019",
+  "smsc_endpoint": "http://127.0.0.1:17020",
+  "packet_a9": {
+    "pcf_addr": "127.0.0.1:5603",
+    "pcf_a8_addr": "127.0.0.1:17041",
+    "a8_bind_addr": "127.0.0.1:17048"
+  },
+  "a21": {
+    "bind_addr": "127.0.0.1:4597",
+    "an_addr": "127.0.0.1:17049"
+  }
+}
