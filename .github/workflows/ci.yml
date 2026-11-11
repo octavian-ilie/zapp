@@ -1,3 +1,7 @@
+# Modified by Project Zapp (2026) from the 1xBTS CI workflow: removed the job
+# that only compiled the reference voice codecs (not distributed with Project
+# Zapp) and the Git LFS checkout (Project Zapp does not use Git LFS).
+# See SOURCE_ORIGIN.md.
 name: CI
 
 on:
@@ -10,23 +14,6 @@ env:
   RUN_CAPTURE_TESTS: "false"
 
 jobs:
-  build-voice-latest-ubuntu:
-    # Ubuntu 26.04's GCC 15 catches compatibility issues in the bundled voice codecs.
-    name: Build voice codecs (Latest Ubuntu)
-    runs-on: ubuntu-26.04
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.96.0"
-
-      - name: Build native codecs
-        run: cargo build -p cdma-voice --all-targets --release --locked
-
   rust:
     name: Rust
     runs-on: ubuntu-24.04
@@ -50,8 +37,6 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Install system dependencies
         run: |
