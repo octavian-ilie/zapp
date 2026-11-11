@@ -1,3 +1,8 @@
+// Modified by Project Zapp (2026): added
+// HlrRepository::upsert_subscriber_with_identity, which PostgresHlrRepository
+// runs in one transaction. The existing upsert queries moved unchanged into
+// helper functions so both paths share them. See SOURCE_ORIGIN.md.
+
 use async_trait::async_trait;
 use cdma_rpc_error::Domain;
 use chrono::{DateTime, Utc};
@@ -34,6 +39,16 @@ impl From<String> for HardwareLookupError {
     fn from(error: String) -> Self {
         Self::Unavailable(error)
     }
+}
+
+/// Identity fields for [`HlrRepository::upsert_subscriber_with_identity`].
+#[derive(Debug, Clone, Copy)]
+pub struct IdentityUpsert<'a> {
+    pub imsi: Option<&'a str>,
+    pub esn: Option<u32>,
+    pub meid: Option<&'a str>,
+    /// Replaces the identity's IMEI; `None` clears it.
+    pub imei: Option<&'a str>,
 }
 
 #[async_trait]
@@ -137,6 +152,41 @@ pub trait HlrRepository: Send + Sync {
         _imei: Option<&str>,
     ) -> Result<SubscriberIdentity, String> {
         Err("IMEI update is unavailable".to_string())
+    }
+
+    /// Creates or updates a subscriber together with its primary identity and
+    /// that identity's IMEI. `PostgresHlrRepository` does this in one
+    /// transaction, so a rejected identity or IMEI leaves no partial change.
+    /// The default runs the steps one after another.
+    async fn upsert_subscriber_with_identity(
+        &self,
+        phone_number: &str,
+        display_name: &str,
+        status: &str,
+        number_type: NumberType,
+        number_plan: NumberPlan,
+        identity: Option<IdentityUpsert<'_>>,
+    ) -> Result<(Subscriber, Option<SubscriberIdentity>), String> {
+        let subscriber = self
+            .upsert_subscriber(phone_number, display_name, status, number_type, number_plan)
+            .await?;
+        let Some(identity) = identity else {
+            return Ok((subscriber, None));
+        };
+        let mut row = self
+            .upsert_identity(
+                subscriber.subscriber_id,
+                identity.imsi,
+                identity.esn,
+                identity.meid,
+            )
+            .await?;
+        if row.imei.as_deref() != identity.imei {
+            row = self
+                .set_identity_imei(row.subscriber_identity_id, identity.imei)
+                .await?;
+        }
+        Ok((subscriber, Some(row)))
     }
 
     // Mobile sightings
@@ -2460,6 +2510,164 @@ impl PostgresHlrRepository {
     }
 }
 
+async fn upsert_subscriber_in<'e, E: sqlx::PgExecutor<'e>>(
+    executor: E,
+    phone_number: &str,
+    display_name: &str,
+    status: &str,
+    number_type: NumberType,
+    number_plan: NumberPlan,
+) -> Result<Subscriber, String> {
+    let now = Utc::now();
+    let id = Uuid::new_v4();
+    let row = sqlx::query_as::<_, SubscriberRow>(
+        r#"
+        WITH up AS (
+            INSERT INTO subscribers (
+                subscriber_id, phone_number, display_name, status,
+                created_at, updated_at, number_type, number_plan
+            )
+            VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+            ON CONFLICT (phone_number) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                status = EXCLUDED.status,
+                updated_at = EXCLUDED.updated_at,
+                number_type = EXCLUDED.number_type,
+                number_plan = EXCLUDED.number_plan
+            RETURNING subscriber_id, phone_number, display_name, status,
+                created_at, updated_at, number_type, number_plan, prl_override_id, service_programming_code, firstchp_override
+        )
+        SELECT up.*,
+            EXISTS (SELECT 1 FROM subscriber_ringtones r WHERE r.subscriber_id = up.subscriber_id) AS has_ringtone,
+            (SELECT MIN(duration_ms) FROM subscriber_ringtones r WHERE r.subscriber_id = up.subscriber_id) AS ringtone_duration_ms
+        FROM up
+        "#,
+    )
+    .bind(id)
+    .bind(phone_number)
+    .bind(display_name)
+    .bind(status)
+    .bind(now)
+    .bind(number_type)
+    .bind(number_plan)
+    .fetch_one(executor)
+    .await
+    .map_err(|e| format!("upsert_subscriber: {e}"))?;
+    row.try_into()
+}
+
+async fn upsert_identity_in(
+    pool: &sqlx::PgPool,
+    conn: &mut sqlx::PgConnection,
+    subscriber_id: Uuid,
+    imsi: Option<&str>,
+    esn: Option<u32>,
+    meid: Option<&str>,
+) -> Result<SubscriberIdentity, String> {
+    let identity_key = MobileIdentityKey::from_parts(imsi, esn, meid)?;
+    let imsi = identity_key.imsi();
+    let esn = identity_key.esn();
+    let meid = identity_key.meid();
+    let now = Utc::now();
+    let id = Uuid::new_v4();
+    check_hardware_identity_unique(pool, subscriber_id, esn, meid).await?;
+
+    let existing = sqlx::query_as::<_, IdentityRow>(
+        "SELECT subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei FROM subscriber_identities WHERE subscriber_id = $1 LIMIT 1",
+    )
+    .bind(subscriber_id)
+    .fetch_optional(&mut *conn)
+    .await
+    .map_err(|e| format!("upsert_identity lookup: {e}"))?;
+
+    let row = if let Some(existing) = existing {
+        sqlx::query_as::<_, IdentityRow>(
+            r#"
+            UPDATE subscriber_identities SET
+                imsi = $2,
+                esn = $3,
+                meid = $4
+            WHERE subscriber_identity_id = $1
+            RETURNING subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei
+            "#,
+        )
+        .bind(existing.subscriber_identity_id)
+        .bind(imsi)
+        .bind(esn.map(|v| v as i64))
+        .bind(meid)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| format!("upsert_identity update: {e}"))?
+    } else {
+        let is_primary = true;
+        sqlx::query_as::<_, IdentityRow>(
+            r#"
+            INSERT INTO subscriber_identities (subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei
+            "#,
+        )
+        .bind(id)
+        .bind(subscriber_id)
+        .bind(imsi)
+        .bind(esn.map(|v| v as i64))
+        .bind(meid)
+        .bind(is_primary)
+        .bind(now)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|e| format!("upsert_identity insert: {e}"))?
+    };
+
+    Ok(row.into())
+}
+
+async fn set_identity_imei_in<'e, E: sqlx::PgExecutor<'e>>(
+    pool: &sqlx::PgPool,
+    executor: E,
+    subscriber_identity_id: Uuid,
+    imei: Option<&str>,
+) -> Result<SubscriberIdentity, String> {
+    let imei = imei
+        .map(normalize_imei)
+        .transpose()
+        .map_err(|e| format!("{VALIDATION_FAILED_PREFIX}{e}"))?;
+    if let Some(imei) = imei.as_deref() {
+        let meid_form = &imei[..IMEI_MEID_FORM_DIGITS];
+        let conflict: Option<(Uuid,)> = sqlx::query_as(
+            r#"
+            SELECT subscriber_id FROM subscriber_identities
+            WHERE subscriber_identity_id <> $1
+              AND (imei = $2 OR meid = $3 OR left(imei, 14) = $3)
+            LIMIT 1
+            "#,
+        )
+        .bind(subscriber_identity_id)
+        .bind(imei)
+        .bind(meid_form)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("set_identity_imei conflict check: {e}"))?;
+        if let Some((owner,)) = conflict {
+            return Err(identity_in_use("IMEI", imei, owner));
+        }
+    }
+    let row = sqlx::query_as::<_, IdentityRow>(
+        r#"
+        UPDATE subscriber_identities SET imei = $2
+        WHERE subscriber_identity_id = $1
+        RETURNING subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei
+        "#,
+    )
+    .bind(subscriber_identity_id)
+    .bind(imei.as_deref())
+    .fetch_optional(executor)
+    .await
+    .map_err(|e| format!("set_identity_imei: {e}"))?
+    .ok_or_else(|| "subscriber identity not found".to_string())?;
+    Ok(row.into())
+}
+
 #[async_trait]
 impl HlrRepository for PostgresHlrRepository {
     async fn upsert_subscriber(
@@ -2470,42 +2678,15 @@ impl HlrRepository for PostgresHlrRepository {
         number_type: NumberType,
         number_plan: NumberPlan,
     ) -> Result<Subscriber, String> {
-        let now = Utc::now();
-        let id = Uuid::new_v4();
-        let row = sqlx::query_as::<_, SubscriberRow>(
-            r#"
-            WITH up AS (
-                INSERT INTO subscribers (
-                    subscriber_id, phone_number, display_name, status,
-                    created_at, updated_at, number_type, number_plan
-                )
-                VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
-                ON CONFLICT (phone_number) DO UPDATE SET
-                    display_name = EXCLUDED.display_name,
-                    status = EXCLUDED.status,
-                    updated_at = EXCLUDED.updated_at,
-                    number_type = EXCLUDED.number_type,
-                    number_plan = EXCLUDED.number_plan
-                RETURNING subscriber_id, phone_number, display_name, status,
-                    created_at, updated_at, number_type, number_plan, prl_override_id, service_programming_code, firstchp_override
-            )
-            SELECT up.*,
-                EXISTS (SELECT 1 FROM subscriber_ringtones r WHERE r.subscriber_id = up.subscriber_id) AS has_ringtone,
-                (SELECT MIN(duration_ms) FROM subscriber_ringtones r WHERE r.subscriber_id = up.subscriber_id) AS ringtone_duration_ms
-            FROM up
-            "#,
+        upsert_subscriber_in(
+            &self.pool,
+            phone_number,
+            display_name,
+            status,
+            number_type,
+            number_plan,
         )
-        .bind(id)
-        .bind(phone_number)
-        .bind(display_name)
-        .bind(status)
-        .bind(now)
-        .bind(number_type)
-        .bind(number_plan)
-        .fetch_one(&self.pool)
         .await
-        .map_err(|e| format!("upsert_subscriber: {e}"))?;
-        Ok(row.try_into()?)
     }
 
     async fn get_subscriber_by_phone_number(
@@ -2646,71 +2827,17 @@ impl HlrRepository for PostgresHlrRepository {
         esn: Option<u32>,
         meid: Option<&str>,
     ) -> Result<SubscriberIdentity, String> {
-        let identity_key = MobileIdentityKey::from_parts(imsi, esn, meid)?;
-        let imsi = identity_key.imsi();
-        let esn = identity_key.esn();
-        let meid = identity_key.meid();
-        let now = Utc::now();
-        let id = Uuid::new_v4();
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| format!("upsert_identity begin: {e}"))?;
-
-        check_hardware_identity_unique(&self.pool, subscriber_id, esn, meid).await?;
-
-        let existing = sqlx::query_as::<_, IdentityRow>(
-            "SELECT subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei FROM subscriber_identities WHERE subscriber_id = $1 LIMIT 1",
-        )
-        .bind(subscriber_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| format!("upsert_identity lookup: {e}"))?;
-
-        let row = if let Some(existing) = existing {
-            sqlx::query_as::<_, IdentityRow>(
-                r#"
-                UPDATE subscriber_identities SET
-                    imsi = $2,
-                    esn = $3,
-                    meid = $4
-                WHERE subscriber_identity_id = $1
-                RETURNING subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei
-                "#,
-            )
-            .bind(existing.subscriber_identity_id)
-            .bind(imsi)
-            .bind(esn.map(|v| v as i64))
-            .bind(meid)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| format!("upsert_identity update: {e}"))?
-        } else {
-            let is_primary = true;
-            sqlx::query_as::<_, IdentityRow>(
-                r#"
-                INSERT INTO subscriber_identities (subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7)
-                RETURNING subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei
-                "#,
-            )
-            .bind(id)
-            .bind(subscriber_id)
-            .bind(imsi)
-            .bind(esn.map(|v| v as i64))
-            .bind(meid)
-            .bind(is_primary)
-            .bind(now)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|e| format!("upsert_identity insert: {e}"))?
-        };
-
+        let identity =
+            upsert_identity_in(&self.pool, &mut tx, subscriber_id, imsi, esn, meid).await?;
         tx.commit()
             .await
             .map_err(|e| format!("upsert_identity commit: {e}"))?;
-        Ok(row.into())
+        Ok(identity)
     }
 
     async fn replace_primary_identity(
@@ -2947,44 +3074,62 @@ impl HlrRepository for PostgresHlrRepository {
         subscriber_identity_id: Uuid,
         imei: Option<&str>,
     ) -> Result<SubscriberIdentity, String> {
-        let imei = imei
-            .map(normalize_imei)
-            .transpose()
-            .map_err(|e| format!("{VALIDATION_FAILED_PREFIX}{e}"))?;
-        if let Some(imei) = imei.as_deref() {
-            let meid_form = &imei[..IMEI_MEID_FORM_DIGITS];
-            let conflict: Option<(Uuid,)> = sqlx::query_as(
-                r#"
-                SELECT subscriber_id FROM subscriber_identities
-                WHERE subscriber_identity_id <> $1
-                  AND (imei = $2 OR meid = $3 OR left(imei, 14) = $3)
-                LIMIT 1
-                "#,
-            )
-            .bind(subscriber_identity_id)
-            .bind(imei)
-            .bind(meid_form)
-            .fetch_optional(&self.pool)
+        set_identity_imei_in(&self.pool, &self.pool, subscriber_identity_id, imei).await
+    }
+
+    async fn upsert_subscriber_with_identity(
+        &self,
+        phone_number: &str,
+        display_name: &str,
+        status: &str,
+        number_type: NumberType,
+        number_plan: NumberPlan,
+        identity: Option<IdentityUpsert<'_>>,
+    ) -> Result<(Subscriber, Option<SubscriberIdentity>), String> {
+        // One transaction: if the identity or IMEI is rejected, the subscriber
+        // insert or update is rolled back too.
+        let mut tx = self
+            .pool
+            .begin()
             .await
-            .map_err(|e| format!("set_identity_imei conflict check: {e}"))?;
-            if let Some((owner,)) = conflict {
-                return Err(identity_in_use("IMEI", imei, owner));
-            }
-        }
-        let row = sqlx::query_as::<_, IdentityRow>(
-            r#"
-            UPDATE subscriber_identities SET imei = $2
-            WHERE subscriber_identity_id = $1
-            RETURNING subscriber_identity_id, subscriber_id, imsi, esn, meid, is_primary, created_at, imei
-            "#,
+            .map_err(|e| format!("upsert_subscriber_with_identity begin: {e}"))?;
+        let subscriber = upsert_subscriber_in(
+            &mut *tx,
+            phone_number,
+            display_name,
+            status,
+            number_type,
+            number_plan,
         )
-        .bind(subscriber_identity_id)
-        .bind(imei.as_deref())
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| format!("set_identity_imei: {e}"))?
-        .ok_or_else(|| "subscriber identity not found".to_string())?;
-        Ok(row.into())
+        .await?;
+        let identity = match identity {
+            Some(identity) => {
+                let mut row = upsert_identity_in(
+                    &self.pool,
+                    &mut tx,
+                    subscriber.subscriber_id,
+                    identity.imsi,
+                    identity.esn,
+                    identity.meid,
+                )
+                .await?;
+                if row.imei.as_deref() != identity.imei {
+                    row = set_identity_imei_in(
+                        &self.pool,
+                        &mut *tx,
+                        row.subscriber_identity_id,
+                        identity.imei,
+                    )
+                    .await?;
+                }
+                Some(row)
+            }
+            None => None,
+        };
+        tx.commit()
+            .await
+            .map_err(|e| format!("upsert_subscriber_with_identity commit: {e}"))?;
+        Ok((subscriber, identity))
     }
 
     async fn upsert_mobile_seen(
