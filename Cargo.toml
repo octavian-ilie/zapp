@@ -1,3 +1,5 @@
+# Modified by Project Zapp (2026): workspace repository metadata. See
+# SOURCE_ORIGIN.md.
 [workspace]
 resolver = "2"
 members = [
@@ -56,8 +58,10 @@ socket2 = "0.6.3"
 [workspace.package]
 license = "Apache-2.0"
 authors = ["Chris Moos"]
-repository = "https://github.com/chrismoos/1xbts"
-homepage = "https://1xbts.org"
+# Modified by Project Zapp (2026): repository metadata now points to the
+# Project Zapp repository. Original authorship is retained. See SOURCE_ORIGIN.md.
+repository = "https://github.com/octavian-ilie/zapp"
+homepage = "https://github.com/octavian-ilie/zapp"
 
 [workspace.lints.rust]
 warnings = "deny"
