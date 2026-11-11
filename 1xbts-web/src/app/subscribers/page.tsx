@@ -1,0 +1,566 @@
+"use client";
+
+import { liveSocket, useLive } from "@/lib/live";
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { Card } from "@/components/card";
+import { ImsiGenerateButton } from "@/components/imsi-generate-button";
+import { NumberPlan, NumberType } from "@/lib/proto/hlr/v1/service";
+import {
+  DEFAULT_NUMBER_PLAN,
+  DEFAULT_NUMBER_TYPE,
+  NUMBER_PLAN_OPTIONS,
+  NUMBER_TYPE_OPTIONS,
+} from "@/lib/subscriber-options";
+import {
+  IMSI_DIGITS,
+  PHONE_MAX_DIGITS,
+  validateImsi,
+  validateImei,
+  validateMeid,
+  validatePhoneNumber,
+} from "@/lib/validation";
+import { apiFetch, fieldErrorsOf } from "@/lib/api-client";
+import { ErrorNotice } from "@/components/error-notice";
+
+type FieldErrors = {
+  phoneNumber?: string;
+  imsi?: string;
+  esn?: string;
+  meid?: string;
+  imei?: string;
+  form?: string;
+};
+
+interface Subscriber {
+  subscriberId: string;
+  phoneNumber: string;
+  displayName: string;
+  status: string;
+  createdAt?: { seconds: number; nanos: number };
+  updatedAt?: { seconds: number; nanos: number };
+}
+
+interface SubscriberIdentity {
+  subscriberIdentityId: string;
+  subscriberId: string;
+  imsi?: string;
+  esn?: number;
+  meid?: string;
+  isPrimary: boolean;
+}
+
+interface UpsertResponse {
+  subscriber?: Subscriber;
+  identity?: SubscriberIdentity;
+  error?: string;
+}
+
+interface MobileInfo {
+  address: string;
+  state: string;
+  phoneNumber?: string;
+  subscriberId?: string;
+}
+
+function formatSubscriberId(subscriberId: string): string {
+  if (subscriberId.length <= 24) return subscriberId;
+  return `${subscriberId.slice(0, 12)}...${subscriberId.slice(-8)}`;
+}
+
+const NO_SUBSCRIBERS: Subscriber[] = [];
+const NO_MOBILES: MobileInfo[] = [];
+
+export default function SubscribersPage() {
+  const liveSubscribers = useLive<{ subscribers?: Subscriber[] }>("/api/subscribers");
+  const subscribers = liveSubscribers.data?.subscribers ?? NO_SUBSCRIBERS;
+  const loading = liveSubscribers.loading;
+  const [deleteError, setDeleteError] = useState<unknown>(null);
+  const [createError, setCreateError] = useState<unknown>(null);
+  const listError = liveSubscribers.errorBody ?? liveSubscribers.error;
+  const [showForm, setShowForm] = useState(false);
+  const liveMobiles = useLive<MobileInfo[]>("/api/mobiles").data;
+  const mobiles = Array.isArray(liveMobiles) ? liveMobiles : NO_MOBILES;
+
+  // Form state
+  const [phoneNumber, setPhoneNumber] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [esnHex, setEsnHex] = useState("");
+  const [imsi, setImsi] = useState("");
+  const [meid, setMeid] = useState("");
+  const [imei, setImei] = useState("");
+  const [numberType, setNumberType] = useState<NumberType>(DEFAULT_NUMBER_TYPE);
+  const [numberPlan, setNumberPlan] = useState<NumberPlan>(DEFAULT_NUMBER_PLAN);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [submitting, setSubmitting] = useState(false);
+  const [observed, setObserved] = useState<{ esn?: string; imsi?: string; meid?: string }>({});
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("new") !== "1") return;
+    const seen = {
+      esn: params.get("esn") ?? undefined,
+      imsi: params.get("imsi") ?? undefined,
+      meid: params.get("meid") ?? undefined,
+    };
+    setShowForm(true);
+    if (seen.esn) setEsnHex(seen.esn);
+    if (seen.imsi) setImsi(seen.imsi);
+    if (seen.meid) setMeid(seen.meid);
+    setObserved(seen);
+  }, []);
+
+  const observedPill = (field: "esn" | "imsi" | "meid", value: string) =>
+    observed[field] && observed[field] === value ? (
+      <span className="ml-2 text-[10.5px] font-semibold px-1.5 rounded-full bg-badge-blue-bg text-badge-blue-text">
+        observed
+      </span>
+    ) : null;
+  const observedInput = (field: "esn" | "imsi" | "meid", value: string) =>
+    observed[field] && observed[field] === value ? " border-accent-indigo/60 bg-active" : "";
+
+  const clearFieldError = (field: keyof FieldErrors) =>
+    setFieldErrors((prev) => {
+      if (prev[field] === undefined && prev.form === undefined) return prev;
+      const next = { ...prev };
+      delete next[field];
+      delete next.form;
+      return next;
+    });
+
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setCreateError(null);
+
+    try {
+      const normalizedPhoneNumber = phoneNumber.trim();
+      const normalizedEsn = esnHex.trim();
+      const normalizedImsi = imsi.trim();
+      const normalizedMeid = meid.trim().toLowerCase();
+      const normalizedImei = imei.trim();
+      const errors: FieldErrors = {};
+
+      const phoneCheck = validatePhoneNumber(normalizedPhoneNumber);
+      if (!phoneCheck.ok) errors.phoneNumber = phoneCheck.error;
+
+      let esnValue: number | undefined;
+      if (normalizedEsn) {
+        esnValue = parseInt(normalizedEsn, 16);
+        if (isNaN(esnValue)) errors.esn = "ESN must be valid hexadecimal";
+      }
+
+      if (normalizedImsi) {
+        const imsiCheck = validateImsi(normalizedImsi);
+        if (!imsiCheck.ok) errors.imsi = imsiCheck.error;
+      }
+
+      if (normalizedMeid) {
+        const meidCheck = validateMeid(normalizedMeid);
+        if (!meidCheck.ok) errors.meid = meidCheck.error;
+      }
+
+      if (normalizedImei) {
+        const imeiCheck = validateImei(normalizedImei);
+        if (!imeiCheck.ok) errors.imei = imeiCheck.error;
+      }
+
+      if (!errors.esn && !errors.imsi && !errors.meid) {
+        if (!normalizedImsi || (!normalizedEsn && !normalizedMeid)) {
+          errors.form = "Enter IMSI plus ESN or MEID";
+        }
+      }
+
+      if (Object.keys(errors).length > 0) {
+        setFieldErrors(errors);
+        return;
+      }
+      setFieldErrors({});
+
+      const body: Record<string, unknown> = {
+        phoneNumber: normalizedPhoneNumber,
+        displayName,
+        status: "active",
+        numberType,
+        numberPlan,
+      };
+      if (esnValue !== undefined) body.esn = esnValue;
+      if (normalizedImsi) body.imsi = normalizedImsi;
+      if (normalizedMeid) body.meid = normalizedMeid;
+      if (normalizedImei) body.imei = normalizedImei;
+
+      await apiFetch<UpsertResponse>(
+        "/api/subscribers",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        "create the subscriber",
+      );
+      setCreateError(null);
+
+      liveSocket().refresh("/api/subscribers");
+
+      // Reset form
+      setPhoneNumber("");
+      setDisplayName("");
+      setEsnHex("");
+      setImsi("");
+      setMeid("");
+      setImei("");
+      setNumberType(DEFAULT_NUMBER_TYPE);
+      setNumberPlan(DEFAULT_NUMBER_PLAN);
+      setShowForm(false);
+      liveSocket().refresh("/api/subscribers");
+    } catch (err) {
+      setFieldErrors(
+        fieldErrorsOf(err, {
+          phone_number: "phoneNumber",
+          phoneNumber: "phoneNumber",
+          imsi: "imsi",
+          esn: "esn",
+          meid: "meid",
+          imei: "imei",
+        }),
+      );
+      setCreateError(err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleDelete = async (subscriberId: string) => {
+    try {
+      await apiFetch(
+        `/api/subscribers?id=${encodeURIComponent(subscriberId)}`,
+        { method: "DELETE" },
+        "delete the subscriber",
+      );
+      setDeleteError(null);
+      liveSocket().refresh("/api/subscribers");
+    } catch (err) {
+      setDeleteError(err);
+    }
+  };
+
+  return (
+    <div className="page-container space-y-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-bold">Subscribers</h1>
+        <button
+          onClick={() => setShowForm(!showForm)}
+          className="text-xs px-3 py-1.5 rounded bg-accent-green-bg text-accent-green border border-accent-green/20 hover:bg-accent-green/15 transition-colors"
+        >
+          {showForm ? "Cancel" : "Add Subscriber"}
+        </button>
+      </div>
+
+      {showForm && (
+        <Card title="New Subscriber">
+          <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-muted mb-1" htmlFor="new-phone-number">
+                  Phone Number
+                </label>
+                <input
+                  id="new-phone-number"
+                  type="text"
+                  value={phoneNumber}
+                  onChange={(e) => {
+                    setPhoneNumber(e.target.value);
+                    clearFieldError("phoneNumber");
+                  }}
+                  inputMode="numeric"
+                  maxLength={PHONE_MAX_DIGITS}
+                  placeholder="5551234567"
+                  required
+                  aria-invalid={!!fieldErrors.phoneNumber}
+                  aria-describedby={
+                    fieldErrors.phoneNumber ? "new-phone-number-error" : undefined
+                  }
+                  className="w-full glass-input font-mono"
+                />
+                {fieldErrors.phoneNumber && (
+                  <p id="new-phone-number-error" className="text-accent-red text-xs mt-1">
+                    {fieldErrors.phoneNumber}
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-muted mb-1">Display Name</label>
+                <input
+                  type="text"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="Test Phone 1"
+                  className="w-full glass-input"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-xs text-muted mb-1" htmlFor="new-esn">
+                  ESN (hex)
+                  {observedPill("esn", esnHex)}
+                </label>
+                <input
+                  id="new-esn"
+                  type="text"
+                  value={esnHex}
+                  onChange={(e) => {
+                    setEsnHex(e.target.value);
+                    clearFieldError("esn");
+                  }}
+                  placeholder="A0000001"
+                  maxLength={8}
+                  aria-invalid={!!fieldErrors.esn}
+                  aria-describedby={fieldErrors.esn ? "new-esn-error" : undefined}
+                  className={`w-full glass-input font-mono${observedInput("esn", esnHex)}`}
+                />
+                {fieldErrors.esn && (
+                  <p id="new-esn-error" className="text-accent-red text-xs mt-1">
+                    {fieldErrors.esn}
+                  </p>
+                )}
+              </div>
+              <div>
+                <div className="flex items-end justify-between mb-1">
+                  <label className="block text-xs text-muted" htmlFor="new-imsi">
+                    IMSI
+                    {observedPill("imsi", imsi)}
+                  </label>
+                  <ImsiGenerateButton
+                    phoneNumber={phoneNumber}
+                    onGenerated={(v) => {
+                      setImsi(v);
+                      clearFieldError("imsi");
+                    }}
+                  />
+                </div>
+                <input
+                  id="new-imsi"
+                  type="text"
+                  value={imsi}
+                  onChange={(e) => {
+                    setImsi(e.target.value);
+                    clearFieldError("imsi");
+                  }}
+                  inputMode="numeric"
+                  maxLength={IMSI_DIGITS}
+                  placeholder="123456789012345"
+                  aria-invalid={!!fieldErrors.imsi}
+                  aria-describedby={fieldErrors.imsi ? "new-imsi-error" : undefined}
+                  className={`w-full glass-input font-mono${observedInput("imsi", imsi)}`}
+                />
+                {fieldErrors.imsi && (
+                  <p id="new-imsi-error" className="text-accent-red text-xs mt-1">
+                    {fieldErrors.imsi}
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-muted mb-1" htmlFor="new-meid">
+                  MEID (hex)
+                  {observedPill("meid", meid)}
+                </label>
+                <input
+                  id="new-meid"
+                  type="text"
+                  value={meid}
+                  onChange={(e) => {
+                    setMeid(e.target.value);
+                    clearFieldError("meid");
+                  }}
+                  placeholder="A000000123ABCD"
+                  maxLength={14}
+                  aria-invalid={!!fieldErrors.meid}
+                  aria-describedby={fieldErrors.meid ? "new-meid-error" : undefined}
+                  className={`w-full glass-input font-mono${observedInput("meid", meid)}`}
+                />
+                {fieldErrors.meid && (
+                  <p id="new-meid-error" className="text-accent-red text-xs mt-1">
+                    {fieldErrors.meid}
+                  </p>
+                )}
+              </div>
+              <div>
+                <label className="block text-xs text-muted mb-1" htmlFor="new-imei">
+                  IMEI (optional)
+                </label>
+                <input
+                  id="new-imei"
+                  type="text"
+                  inputMode="numeric"
+                  value={imei}
+                  onChange={(e) => {
+                    setImei(e.target.value);
+                    clearFieldError("imei");
+                  }}
+                  placeholder="990001242899516"
+                  maxLength={15}
+                  aria-invalid={!!fieldErrors.imei}
+                  aria-describedby={fieldErrors.imei ? "new-imei-error" : undefined}
+                  className="w-full glass-input font-mono"
+                />
+                {fieldErrors.imei && (
+                  <p id="new-imei-error" className="text-accent-red text-xs mt-1">
+                    {fieldErrors.imei}
+                  </p>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-muted mb-1" htmlFor="new-number-type">
+                  Number Type
+                </label>
+                <select
+                  id="new-number-type"
+                  value={numberType}
+                  onChange={(e) => setNumberType(Number(e.target.value) as NumberType)}
+                  className="w-full glass-input"
+                >
+                  {NUMBER_TYPE_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-muted mb-1" htmlFor="new-number-plan">
+                  Numbering Plan
+                </label>
+                <select
+                  id="new-number-plan"
+                  value={numberPlan}
+                  onChange={(e) => setNumberPlan(Number(e.target.value) as NumberPlan)}
+                  className="w-full glass-input"
+                >
+                  {NUMBER_PLAN_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <ErrorNotice error={createError} className="text-xs" />
+            {fieldErrors.form && (
+              <p className="text-accent-red text-xs">{fieldErrors.form}</p>
+            )}
+
+            <button
+              type="submit"
+              disabled={submitting}
+              className="text-xs px-4 py-1.5 rounded bg-accent-green-bg text-accent-green border border-accent-green/20 hover:bg-accent-green/15 disabled:opacity-50 transition-colors"
+            >
+              {submitting ? "Creating..." : "Create Subscriber"}
+            </button>
+          </form>
+        </Card>
+      )}
+
+      <Card title={`Provisioned Subscribers (${subscribers.length})`}>
+        <ErrorNotice error={deleteError} className="mb-3" />
+        {loading ? (
+          <p className="text-dimmed text-sm">Loading...</p>
+        ) : listError ? (
+          <ErrorNotice error={listError} />
+        ) : subscribers.length === 0 ? (
+          <p className="text-dimmed text-sm">
+            No subscribers provisioned. Click &quot;Add Subscriber&quot; to create one.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Phone Number</th>
+                  <th>Display Name</th>
+                  <th>Status</th>
+                  <th>Active Mobile</th>
+                  <th>Subscriber ID</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {subscribers.map((sub) => (
+                  <tr key={sub.subscriberId}>
+                    <td className="text-secondary font-mono">
+                      <Link
+                        href={`/subscribers/${encodeURIComponent(sub.subscriberId)}`}
+                        className="hover:text-accent-green transition-colors"
+                      >
+                        {sub.phoneNumber}
+                      </Link>
+                    </td>
+                    <td className="text-secondary">
+                      {sub.displayName || "-"}
+                    </td>
+                    <td>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded ${
+                          sub.status === "active"
+                            ? "bg-badge-green-bg text-badge-green-text"
+                            : sub.status === "suspended"
+                              ? "bg-badge-yellow-bg text-badge-yellow-text"
+                              : "bg-badge-red-bg text-badge-red-text"
+                        }`}
+                      >
+                        {sub.status}
+                      </span>
+                    </td>
+                    <td>
+                      {(() => {
+                        const ms = mobiles.find((m) => m.subscriberId === sub.subscriberId);
+                        if (!ms) return <span className="text-dimmed">-</span>;
+                        return (
+                          <Link
+                            href={`/mobiles/${encodeURIComponent(ms.address)}`}
+                            className="text-accent-green hover:text-accent-green transition-colors"
+                          >
+                            {ms.state}
+                          </Link>
+                        );
+                      })()}
+                    </td>
+                    <td className="text-muted font-mono text-[11px]">
+                      <Link
+                        href={`/subscribers/${encodeURIComponent(sub.subscriberId)}`}
+                        className="hover:text-accent-green transition-colors"
+                        title={sub.subscriberId}
+                      >
+                        {formatSubscriberId(sub.subscriberId)}
+                      </Link>
+                    </td>
+                    <td className="text-right space-x-3">
+                      <Link
+                        href={`/subscribers/${encodeURIComponent(sub.subscriberId)}`}
+                        className="text-xs text-accent-green hover:text-accent-green transition-colors"
+                      >
+                        View
+                      </Link>
+                      <button
+                        onClick={() => handleDelete(sub.subscriberId)}
+                        className="text-xs text-accent-red hover:text-accent-red transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}

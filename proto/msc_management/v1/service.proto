@@ -1,0 +1,136 @@
+syntax = "proto3";
+package msc_management.v1;
+
+import "base_station/v1/service.proto";
+import "bsc/v1/service.proto";
+import "events/v1/msc.proto";
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// Active MSC call identifiers.
+message CallList {
+  // MSC call/session IDs currently tracked by call control.
+  repeated string call_ids = 1;
+}
+
+// Closed mode requires an Active or Suspended subscriber for either destination.
+message SendSmsRequest {
+  string originating_number = 1;
+  string text = 2;
+  optional uint64 timeout_ms = 3;
+  oneof destination {
+    string destination_number = 4;
+    string destination_imsi = 5;
+  }
+  // C.S0015-B teleservice ID. Defaults to 0x1002 (WMT) when absent.
+  // 0x1004 (WAP) selects WAP Push delivery used by MMS M-Notification.ind.
+  optional uint32 teleservice_id = 6;
+  // Opaque User Data bytes for non-text teleservices (binary WAP Push PDU
+  // already framed per WAP-259 §6.5). When set, `text` is ignored and the
+  // BSC emits these as MSG_ENCODING=0x00 octet user data.
+  optional bytes raw_user_data = 7;
+}
+
+message SendSmsResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+// MSC management API for mobile-terminated voice, SMS, and call state.
+// One base station as the MSC sees it.
+message BaseStationSummary {
+  // Management endpoint the MSC enrolls the node through.
+  string management_endpoint = 1;
+  // Empty until the node has enrolled at least once.
+  string node_id = 2;
+  // A1 address the node reported, empty until enrolled.
+  string a1_addr = 3;
+  // Whether the MSC currently holds the node's A1 connection.
+  bool attached = 4;
+  repeated base_station.v1.ServedCell cells = 5;
+  // Why the node is not attached, when it is not.
+  optional string status_detail = 6;
+}
+
+// Every base station the MSC is configured to serve.
+message BaseStationList {
+  repeated BaseStationSummary nodes = 1;
+}
+
+message ListAuthenticationEventsRequest {
+  // An event matches when its IMSI is listed here or its ESN equals `esn`.
+  repeated string imsis = 1;
+  optional uint32 esn = 2;
+  // Most events to return. Zero returns every retained match.
+  uint32 limit = 3;
+}
+
+// Authentication results, newest first.
+message AuthenticationEventList {
+  repeated events.v1.AuthenticationEvent events = 1;
+}
+
+message ListAdmissionEventsRequest {
+  // An event matches when its IMSI is listed here, its ESN equals `esn` or
+  // its MEID equals `meid`. With no filter every retained event matches.
+  repeated string imsis = 1;
+  optional uint32 esn = 2;
+  string meid = 3;
+  // Most events to return. Zero returns every retained match.
+  uint32 limit = 4;
+  // Latest decision per handset, independent of activity-history retention.
+  bool current_only = 5;
+}
+
+message AdmissionEventList {
+  repeated events.v1.AdmissionEvent events = 1;
+  // `open` or `closed`.
+  string access_mode = 2;
+  // `subscriber_only` or `any`.
+  string register_policy = 3;
+  // `off`, `monitor` or `enforce`.
+  string authentication_mode = 4;
+  bool current_snapshot = 5;
+}
+
+message InitiateOtaspRequest {
+  string subscriber_id = 1;
+  // Omit to select the subscriber's primary identity.
+  optional string imsi = 2;
+}
+
+message InitiateOtaspResponse {
+  uint64 call_id = 1;
+}
+
+message ReleaseCallRequest {
+  uint64 call_id = 1;
+}
+
+service MscManagementService {
+  // Pages the handset and applies the configured OTASP writes and subscriber overrides.
+  rpc InitiateOtasp(InitiateOtaspRequest) returns (InitiateOtaspResponse);
+  // Lists the base stations the MSC serves, attached or not.
+  rpc ListBaseStations(google.protobuf.Empty) returns (BaseStationList);
+  // Initiates a mobile-terminated voice call through the BSC and voice gateway.
+  rpc InitiateCall(bsc.v1.InitiateCallRequest) returns (bsc.v1.InitiateCallResponse);
+  // Submits an SMS for mobile-terminated delivery.
+  rpc SendSms(SendSmsRequest) returns (SendSmsResponse);
+  // Lists active MSC call IDs.
+  rpc ListCalls(google.protobuf.Empty) returns (CallList);
+  // Releases a call from the network side. A call with a traffic channel is
+  // cleared with an A1 Clear Command, so the mobile receives a Release Order.
+  // A call still being paged is abandoned. Fails with NOT_FOUND for an
+  // unknown call ID.
+  rpc ReleaseCall(ReleaseCallRequest) returns (google.protobuf.Empty);
+  // Streams live OTASP events for real-time dashboards. Persisted
+  // session history is served separately by the HLR service.
+  rpc StreamOtaspEvents(google.protobuf.Empty) returns (stream events.v1.MscNetworkEvent);
+  // Lists recent authentication results for the given mobiles. The MSC keeps
+  // the most recent results in memory only, so a restart clears them.
+  rpc ListAuthenticationEvents(ListAuthenticationEventsRequest) returns (AuthenticationEventList);
+  // Lists recent admission decisions and the configured access policy. The
+  // MSC keeps the most recent decisions in memory only, so a restart clears
+  // them.
+  rpc ListAdmissionEvents(ListAdmissionEventsRequest) returns (AdmissionEventList);
+}

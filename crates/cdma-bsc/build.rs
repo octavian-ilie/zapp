@@ -1,0 +1,35 @@
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tonic_build::configure()
+        .build_server(true)
+        .build_client(true)
+        .type_attribute(
+            "management.v1.ManagementEvent.Body",
+            "#[allow(clippy::large_enum_variant)]",
+        )
+        .type_attribute(
+            "management.v1.ManagementEvent.body",
+            "#[allow(clippy::large_enum_variant)]",
+        )
+        .type_attribute(
+            "management.v1.management_event.Body",
+            "#[allow(clippy::large_enum_variant)]",
+        )
+        .compile_protos(
+            &[
+                "../../proto/bsc/v1/service.proto",
+                "../../proto/events/v1/msc.proto",
+                "../../proto/management/v1/service.proto",
+                "../../proto/bts_management/v1/service.proto",
+                "../../proto/bsc_management/v1/service.proto",
+                "../../proto/base_station/v1/service.proto",
+                "../../proto/msc_management/v1/service.proto",
+                "../../proto/pcf_management/v1/service.proto",
+                "../../proto/pdsn_management/v1/service.proto",
+                "../../proto/hlr/v1/service.proto",
+                "../../proto/smsc/v1/service.proto",
+                "../../proto/packet/v1/service.proto",
+            ],
+            &["../../proto"],
+        )?;
+    Ok(())
+}

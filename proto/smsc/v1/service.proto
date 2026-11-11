@@ -1,0 +1,253 @@
+syntax = "proto3";
+package smsc.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+// SMS submission accepted by the SMSC.
+message SmsSubmission {
+  string sms_id = 1;  // UUID
+  string originating_number = 2;
+  optional string destination_number = 3;   // set when targeting by phone
+  optional string originating_subscriber_id = 4;
+  optional string destination_subscriber_id = 5;
+  string text = 6;
+  string state = 7;  // "accepted", "paging", "page_response_received", "sent", "failed", "expired"
+  optional string failure_reason = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+  optional uint64 destination_esn = 11;     // set when targeting by ESN
+  optional string destination_imsi = 12;    // set when targeting by IMSI/IMSI_S digits
+  // C.S0015-B teleservice ID. Defaults to 0x1002 (WMT) when not set.
+  // 0x1004 (CATPT) selects WAP Push delivery used by MMS M-Notification.ind.
+  optional uint32 teleservice_id = 13;
+  // Opaque User Data bytes (MSG_ENCODING=0x00 octet). When set, the BSC
+  // emits these bytes verbatim as the bearer-data User Data sub-parameter
+  // and ignores `text`. Used to carry WAP Push PDUs end to end.
+  optional bytes raw_user_data = 14;
+  // Inbound interconnect messages must not be routed back out, or they loop.
+  bool from_interconnect = 15;
+}
+
+// One delivery attempt for an SMS submission.
+message SmsDeliveryAttempt {
+  string sms_delivery_attempt_id = 1;  // UUID
+  string sms_id = 2;                    // FK
+  uint32 attempt_number = 3;
+  string state = 4;  // "queued", "paging", "page_response_received", "forward_sent", "failed", "expired"
+  optional string target_subscriber_id = 5;  // absent for unprovisioned MS
+  optional string failure_reason = 6;
+  google.protobuf.Timestamp requested_at = 7;
+  optional google.protobuf.Timestamp completed_at = 8;
+  google.protobuf.Timestamp created_at = 9;
+  google.protobuf.Timestamp updated_at = 10;
+}
+
+// MO SMS deduplication fingerprint extracted from teleservice payloads.
+message MoSmsFingerprint {
+  uint32 teleservice_id = 1;
+  uint32 message_type = 2;
+  uint32 message_id = 3;
+}
+
+// Creates an SMS submission for later routing and delivery.
+message CreateSmsSubmissionRequest {
+  string originating_number = 1;
+  optional string destination_number = 2;   // set one of the three destination fields
+  string text = 3;
+  optional string originating_subscriber_id = 4;
+  optional string destination_subscriber_id = 5;
+  optional uint64 destination_esn = 6;
+  optional string destination_imsi = 7;
+  // C.S0015-B teleservice ID. Defaults to 0x1002 (WMT) when absent.
+  optional uint32 teleservice_id = 8;
+  // Opaque User Data bytes for non-text teleservices (e.g. 0x1004 WAP Push
+  // carrying an MMS M-Notification.ind PDU). When set, `text` is ignored.
+  optional bytes raw_user_data = 9;
+  bool from_interconnect = 10;
+}
+
+// Created SMS submission.
+message CreateSmsSubmissionResponse {
+  SmsSubmission submission = 1;
+}
+
+// Creates an MO SMS submission or returns a recent matching duplicate.
+message CreateOrGetRecentMoSubmissionRequest {
+  string originating_number = 1;
+  string destination_number = 2;
+  string text = 3;
+  optional string originating_subscriber_id = 4;
+  optional string destination_subscriber_id = 5;
+  MoSmsFingerprint fingerprint = 6;
+}
+
+message CreateOrGetRecentMoSubmissionResponse {
+  SmsSubmission submission = 1;
+  bool created = 2;
+}
+
+// Updates the state of an SMS submission.
+message UpdateSmsSubmissionStateRequest {
+  string sms_id = 1;
+  string state = 2;
+  optional string failure_reason = 3;
+}
+
+// Updated SMS submission.
+message UpdateSmsSubmissionStateResponse {
+  SmsSubmission submission = 1;
+}
+
+// Looks up one SMS submission.
+message GetSmsSubmissionRequest {
+  string sms_id = 1;
+}
+
+// SMS submission plus its delivery attempts.
+message GetSmsSubmissionResponse {
+  SmsSubmission submission = 1;
+  repeated SmsDeliveryAttempt delivery_attempts = 2;
+}
+
+// Paged/filterable request for SMS submission list views.
+message ListSmsSubmissionsRequest {
+  optional uint32 limit = 1;
+  optional uint32 offset = 2;
+  optional string destination_number = 3;
+  optional string state = 4;
+  optional uint64 destination_esn = 5;
+  optional string destination_imsi = 6;
+  optional string originating_number = 7;
+}
+
+// SMS submission list page and total count.
+message ListSmsSubmissionsResponse {
+  repeated SmsSubmission submissions = 1;
+  uint32 total = 2;
+}
+
+// Creates a new delivery attempt for a submission.
+message CreateDeliveryAttemptRequest {
+  string sms_id = 1;
+  optional string target_subscriber_id = 2;  // omit for unprovisioned MS
+}
+
+// Created delivery attempt.
+message CreateDeliveryAttemptResponse {
+  SmsDeliveryAttempt attempt = 1;
+}
+
+// Updates the state of one delivery attempt.
+message UpdateDeliveryAttemptStateRequest {
+  string sms_delivery_attempt_id = 1;
+  string state = 2;
+  optional string failure_reason = 3;
+}
+
+// Updated delivery attempt.
+message UpdateDeliveryAttemptStateResponse {
+  SmsDeliveryAttempt attempt = 1;
+}
+
+// Assigns or updates the resolved destination subscriber for a submission.
+message UpdateDestinationSubscriberRequest {
+  string sms_id = 1;
+  string destination_subscriber_id = 2;
+}
+
+message SubmitMoRequest {
+  string originating_number = 1;
+  string destination_number = 2;
+  string text = 3;
+  optional string originating_subscriber_id = 4;
+  // C.S0015-B teleservice ID. Defaults to 0x1002 (WMT) when absent.
+  optional uint32 teleservice_id = 5;
+  optional bytes raw_user_data = 6;
+  optional MoSmsFingerprint fingerprint = 7;
+}
+
+message SubmitMoResponse {
+  string sms_id = 1;
+  // False for a duplicate submission.
+  bool accepted = 2;
+}
+
+message SubmitMtRequest {
+  string originating_number = 1;
+  oneof destination {
+    string number = 2;
+    uint64 esn = 3;
+    string imsi = 4;
+  }
+  string text = 5;
+  optional uint32 teleservice_id = 6;
+  optional bytes raw_user_data = 7;
+  optional string destination_subscriber_id = 8;
+  // Overrides registration routing when its binding has not yet been persisted.
+  optional string serving_node = 9;
+}
+
+message SubmitMtResponse {
+  string sms_id = 1;
+}
+
+message DeliveryTarget {
+  oneof identity {
+    string imsi = 1;
+    uint64 esn = 2;
+  }
+  optional string serving_node = 3;
+}
+
+message DeliveryCommand {
+  string sms_id = 1;
+  DeliveryTarget target = 2;
+  string originating_number = 3;
+  string text = 4;
+  optional uint32 teleservice_id = 5;
+  optional bytes raw_user_data = 6;
+  // Outcomes are accepted only while this attempt is current.
+  string attempt_id = 7;
+}
+
+message DeliveryOutcome {
+  string sms_id = 1;
+  Result result = 2;
+  optional string detail = 3;
+  // Must match the delivery command's attempt_id.
+  string attempt_id = 4;
+
+  enum Result {
+    RESULT_UNSPECIFIED = 0;
+    RESULT_DELIVERED = 1;
+    RESULT_NOT_REACHABLE = 2;
+    RESULT_FAILED = 3;
+  }
+}
+
+// SMSC service for storing SMS submissions and tracking delivery attempts.
+service SmscService {
+  // Accepts a new SMS submission.
+  rpc CreateSmsSubmission(CreateSmsSubmissionRequest) returns (CreateSmsSubmissionResponse);
+  // Accepts an MO SMS submission with duplicate suppression.
+  rpc CreateOrGetRecentMoSubmission(CreateOrGetRecentMoSubmissionRequest) returns (CreateOrGetRecentMoSubmissionResponse);
+  // Updates high-level submission state.
+  rpc UpdateSmsSubmissionState(UpdateSmsSubmissionStateRequest) returns (UpdateSmsSubmissionStateResponse);
+  // Returns one submission and its delivery attempts.
+  rpc GetSmsSubmission(GetSmsSubmissionRequest) returns (GetSmsSubmissionResponse);
+  // Lists submissions with optional filters.
+  rpc ListSmsSubmissions(ListSmsSubmissionsRequest) returns (ListSmsSubmissionsResponse);
+  // Starts tracking a new delivery attempt for a submission.
+  rpc CreateDeliveryAttempt(CreateDeliveryAttemptRequest) returns (CreateDeliveryAttemptResponse);
+  // Updates delivery-attempt state.
+  rpc UpdateDeliveryAttemptState(UpdateDeliveryAttemptStateRequest) returns (UpdateDeliveryAttemptStateResponse);
+  // Assigns or updates the resolved destination subscriber.
+  rpc UpdateDestinationSubscriber(UpdateDestinationSubscriberRequest) returns (google.protobuf.Empty);
+
+  rpc SubmitMo(SubmitMoRequest) returns (SubmitMoResponse);
+
+  rpc SubmitMt(SubmitMtRequest) returns (SubmitMtResponse);
+
+  rpc DeliveryStream(stream DeliveryOutcome) returns (stream DeliveryCommand);
+}

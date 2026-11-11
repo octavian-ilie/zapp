@@ -1,0 +1,72 @@
+export type ValidationResult = { ok: true } | { ok: false; error: string };
+
+export const PHONE_MAX_DIGITS = 15;
+export const IMSI_DIGITS = 15;
+export const MEID_HEX_DIGITS = 14;
+export const IMEI_DIGITS = 15;
+
+export function validatePhoneNumber(value: string): ValidationResult {
+  if (value.length === 0) return { ok: false, error: "Phone number is required" };
+  if (!/^\d+$/.test(value))
+    return { ok: false, error: "Phone number must contain only digits 0–9" };
+  if (value.length > PHONE_MAX_DIGITS)
+    return {
+      ok: false,
+      error: `Phone number can be at most ${PHONE_MAX_DIGITS} digits (E.164)`,
+    };
+  return { ok: true };
+}
+
+export function validateImsi(value: string): ValidationResult {
+  if (!/^\d+$/.test(value))
+    return { ok: false, error: "IMSI must contain only digits 0–9" };
+  if (value.length !== IMSI_DIGITS)
+    return { ok: false, error: `IMSI must be exactly ${IMSI_DIGITS} digits` };
+  return { ok: true };
+}
+
+export function validateMeid(value: string): ValidationResult {
+  if (!/^[0-9a-fA-F]+$/.test(value))
+    return { ok: false, error: "MEID must contain only hexadecimal digits" };
+  if (value.length !== MEID_HEX_DIGITS)
+    return { ok: false, error: `MEID must be exactly ${MEID_HEX_DIGITS} hex digits` };
+  return { ok: true };
+}
+
+export function validateImei(value: string): ValidationResult {
+  if (!/^\d+$/.test(value))
+    return { ok: false, error: "IMEI must contain only digits 0–9" };
+  if (value.length !== IMEI_DIGITS)
+    return { ok: false, error: `IMEI must be exactly ${IMEI_DIGITS} digits` };
+  let sum = 0;
+  for (let i = 0; i < value.length; i++) {
+    let digit = Number(value[value.length - 1 - i]);
+    if (i % 2 === 1) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+  }
+  if (sum % 10 !== 0) return { ok: false, error: "IMEI check digit is invalid" };
+  return { ok: true };
+}
+
+export const RINGTONE_MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
+export const ACCEPTED_RINGTONE_MIME = [
+  "audio/wav",
+  "audio/wave",
+  "audio/x-wav",
+];
+
+export function validateRingtoneFile(file: File): ValidationResult {
+  if (file.size === 0) return { ok: false, error: "File is empty" };
+  if (file.size > RINGTONE_MAX_UPLOAD_BYTES)
+    return {
+      ok: false,
+      error: `File must be at most ${RINGTONE_MAX_UPLOAD_BYTES / (1024 * 1024)} MB`,
+    };
+  const name = file.name.toLowerCase();
+  if (!name.endsWith(".wav"))
+    return { ok: false, error: "File must be a .wav file" };
+  return { ok: true };
+}

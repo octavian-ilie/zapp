@@ -1,0 +1,24 @@
+[package]
+name = "cdma-a12"
+version = "0.1.0"
+edition = "2024"
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A12 AN-AAA (HRPD access terminal authentication) support for 1xBTS."
+
+[dependencies]
+md-5 = "0.10"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["net", "time"] }
+getrandom = "0.2"
+log = "0.4"
+thiserror = "2"
+cdma-hlr = { path = "../cdma-hlr" }
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true
