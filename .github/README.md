@@ -3,8 +3,8 @@
 **An open-source restoration of Romania's historical Zapp CDMA mobile network.**
 
 > **Status: early development.** Initial upstream audit completed. The
-> complete 1xBTS source is imported without modification. Full validation
-> pending.
+> complete 1xBTS source is imported, with one test fix by Project Zapp. Full
+> validation pending.
 >
 > The network has not been run as a whole. Nothing has been verified over the
 > air or with handsets, and the Zapp distribution itself (installer, managed
@@ -146,25 +146,26 @@ interoperability testing and lab use. It reports working 1x SMS, voice and
 packet data, plus initial experimental EV-DO Rev. 0 and Rev. A packet data.
 
 The complete 1xBTS source at commit `9897714` (8 November 2026) is imported
-into this repository without modification, at its original paths. That
+into this repository at its original paths. That
 includes every crate and network component, the reference voice codecs, the
 SIP voice gateway, the SIM applet, the test data and the CI workflow. Nothing
 is cloned from 1xBTS at build or install time. From here on, Project Zapp
 develops it independently, and keeps its own changes separate from this
-baseline. [`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md) records the import and how
-it was checked.
+baseline. So far, Project Zapp has changed one upstream test file.
+[`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md) records the import, how it was
+checked, and every change.
 
-Validation of the import is in progress. In a local Linux build without the
-SDR backends and the SIP voice gateway, which need further system libraries,
-the imported code compiles, passes the formatting and Clippy checks, and its
-automated tests give the same results as the same upstream revision built and
-tested the same way: 4,199 passed and 44 are ignored by upstream. One
-timing-sensitive upstream test, which also fails intermittently on the
-unmodified upstream source, failed in both runs. These are software tests
+Validation of the import is in progress. Upstream's CI workflow runs
+unmodified on this repository. On GitHub it builds the workspace, including
+the SDR backends, the SIP voice gateway and the reference voice codecs, and
+passes the formatting and Clippy checks. Its tests gave the same results as
+upstream's own CI at the same revision: 4,271 passed, and 44 are ignored by
+upstream. One upstream test failed intermittently; Project Zapp has fixed the
+test (see [`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md)). These are software tests
 (protocol state machines, synthetic and recorded signals), so they do not show
-that any capability works over the air. Full validation, including the SDR
-builds, the SIP voice gateway, the database-backed tests and upstream's CI on
-this repository, is pending.
+that any capability works over the air. Full validation, including the
+database-backed tests, the web dashboard and tests with real radios and
+handsets, is pending.
 
 Some files in the 1xBTS tree, including the reference voice codecs, are under
 their own terms rather than the Apache License. See [`NOTICE`](../NOTICE).
@@ -175,15 +176,15 @@ their own terms rather than the Apache License. See [`NOTICE`](../NOTICE).
 | --- | --- |
 | Repository, licensing and documentation | In progress |
 | Upstream technical audit | Done: initial audit of 1xBTS `9897714` |
-| Upstream source import | Done: complete 1xBTS `9897714`, unmodified; full validation pending |
+| Upstream source import | Done: complete 1xBTS `9897714`, one test fix by Project Zapp; full validation pending |
 | CDMA2000 1x network services | Imported from 1xBTS; software tests only, not verified with handsets |
-| Voice | Imported from 1xBTS, including the reference codecs; codec tests pass locally; SIP voice gateway not yet built or tested by Project Zapp |
+| Voice | Imported from 1xBTS, including the reference codecs and the SIP voice gateway; software tests pass in CI; not tested with calls |
 | EV-DO packet data | Imported from 1xBTS (experimental upstream); not verified |
 | Zapp Network Studio | Not started (the upstream dashboard is imported as `1xbts-web`) |
 | Installation and service management | Not started |
 | Diagnostics and simulation | Upstream simulation tools imported; not yet integrated |
 | Historical network profiles | Not started |
-| Automated testing and CI | Upstream CI workflow imported unmodified; not yet run for this repository |
+| Automated testing and CI | Upstream CI workflow imported unmodified; runs on every pull request; database-backed tests not yet run |
 
 ## Roadmap
 
