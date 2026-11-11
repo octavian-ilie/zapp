@@ -58,6 +58,7 @@ firmware/
 
 # --- Local and site-specific configuration ----------------------------------
 *.local.*
+!config/femto.local.json.example
 local/
 site/
 config.local/
@@ -132,3 +133,34 @@ Thumbs.db
 .claude/settings.local.json
 CLAUDE.md
 CLAUDE.local.md
+AGENTS.md
+
+# --- Rules carried over from the imported 1xBTS source ----------------------
+*.wav
+/captures/
+!test/iq/**/*.wav
+!config/*.wav
+test/capture/*
+!test/capture/README.md
+!test/capture/manifest.toml
+!test/capture/create-archive.sh
+!test/capture/fetch-archive.sh
+*.out
+.claude/
+.worktrees
+config/*.local.json
+config/femto/segw/
+config/femto-segw/femto.local.json
+config/femto-segw/swanctl/
+*.iml
+capture-iq-wav
+
+# --- Third-party material not distributed with Project Zapp -----------------
+# See SOURCE_ORIGIN.md. A rights holder may place these files at the paths
+# below for local builds and tests; they must never be committed.
+crates/cdma-voice/csrc/
+crates/cdma-voice/tests/evrc_b_vectors/
+crates/cdma-otasp/tests/fixtures/*.prl
+crates/hdtp-gw/docs/*.pdf
+sim/applet/dist/
+test/iq/evdo_downlink_884490_4x_chip.wav
