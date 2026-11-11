@@ -2,10 +2,13 @@
 
 **An open-source restoration of Romania's historical Zapp CDMA mobile network.**
 
-> **Status: early development.** This repository currently contains project
-> documentation only. No part of the Zapp distribution is operational yet.
-> Functionality and handset compatibility will be documented only after they
-> have been implemented and tested.
+> **Status: early development.** This repository contains the CDMA2000
+> software stack imported from 1xBTS. It builds and passes its automated
+> software tests on Linux. Nothing has been verified over the air or with
+> handsets, and the Zapp distribution itself (installer, managed services,
+> Zapp Network Studio) does not exist yet. Functionality and handset
+> compatibility will be documented only after they have been implemented and
+> tested.
 
 ---
 
@@ -71,8 +74,9 @@ use the 3GPP family (GSM, UMTS, LTE, NR) that most European networks used.
 
 ## Objectives
 
-These are the project's goals. **None of them is implemented in this
-repository yet.**
+These are the project's goals. The imported 1xBTS stack is the starting point
+for the network infrastructure. **None of these goals is complete or
+verified as part of the Zapp distribution yet.**
 
 - **CDMA2000 1xRTT network infrastructure:** radio access and core network
   for voice, SMS and packet data.
@@ -135,17 +139,21 @@ developed by Chris Moos and its contributors.
 Upstream describes 1xBTS as experimental and intended for research,
 interoperability testing and lab use. It reports working 1x SMS, voice and
 packet data, plus initial experimental EV-DO Rev. 0 and Rev. A packet data.
-Project Zapp has **not yet** independently built, tested or verified these
-capabilities.
 
-The plan is to bring the relevant upstream source directly into this
-repository, so that the distribution is self-contained and does not rely on
-separately cloned upstream repositories. Each import will:
+The 1xBTS source was imported into this repository at commit `9897714`
+(8 November 2026) and keeps its original layout. From here on, Project Zapp
+develops it independently. Nothing is cloned from 1xBTS at build or install
+time. [`SOURCE_ORIGIN.md`](SOURCE_ORIGIN.md) records the revision, every
+change made by Project Zapp, and the material that was not imported.
 
-- record the exact upstream commit it was taken from,
-- keep all upstream licences, copyright notices and attribution,
-- be built and tested as an unmodified baseline before any Zapp-specific
-  changes are made.
+The most significant exclusion is the **reference voice codecs**. Their
+redistribution terms are unresolved, so they are not included. Without them,
+the stack builds and runs, but voice transcoding, tones, announcements and
+the SIP voice gateway are unavailable.
+
+On Linux, the imported code builds and passes its automated tests. These are
+software tests (codecs, protocol state machines, synthetic signals), so they
+do not show that any capability works over the air.
 
 Third-party components remain under their own licences. See
 [`NOTICE`](NOTICE).
@@ -155,14 +163,15 @@ Third-party components remain under their own licences. See
 | Area | Status |
 | --- | --- |
 | Repository, licensing and documentation | In progress |
-| Upstream 1xBTS baseline (import, build, test) | Not started |
-| CDMA2000 1x network services | Not started |
-| EV-DO packet data | Not started |
-| Zapp Network Studio | Not started |
+| 1xBTS source import | Done: imported at `9897714`; builds and passes its automated software tests on Linux |
+| CDMA2000 1x network services | Imported from 1xBTS; software tests only, not verified with handsets |
+| Voice | Limited: reference voice codecs not included (see `SOURCE_ORIGIN.md`) |
+| EV-DO packet data | Imported from 1xBTS (experimental upstream); not verified |
+| Zapp Network Studio | Not started (the upstream dashboard is imported as `1xbts-web`) |
 | Installation and service management | Not started |
-| Diagnostics and simulation | Not started |
+| Diagnostics and simulation | Upstream simulation tools imported; not yet integrated |
 | Historical network profiles | Not started |
-| Automated testing and CI | Not started |
+| Automated testing and CI | In progress: upstream CI workflow imported and adapted |
 
 ## Roadmap
 
@@ -184,12 +193,35 @@ the upstream baseline is assessed.
 7. **Operations and quality.** Upgrade, backup and restore, CI, and
    documentation of supported hardware.
 
+## Building from source
+
+There is no installer yet. A development build of the Rust workspace needs:
+- Rust 1.96.0, selected automatically by `rust-toolchain.toml`;
+- `protoc` (`protobuf-compiler`);
+- a C/C++ toolchain and `pkg-config`.
+
+The base station's SDR backends and the SIP voice gateway need further native
+libraries. They are listed in
+[`docs/upstream/1xbts-README.md`](docs/upstream/1xbts-README.md).
+
+To build without any radio hardware support:
+
+```sh
+cargo build --release --workspace \
+  --exclude cdma-bts --exclude cdma-nib \
+  --exclude cdma-voice-gw --exclude libre --exclude libre-sys
+cargo build --release -p cdma-bts -p cdma-nib --no-default-features
+```
+
 ## Documentation
 
+- [SOURCE_ORIGIN.md](SOURCE_ORIGIN.md): imported revision, changes and
+  exclusions.
 - [NOTICE](NOTICE): attribution and third-party licensing.
-
-Technical documentation will be added as components are implemented and
-verified.
+- [docs/upstream/1xbts-README.md](docs/upstream/1xbts-README.md): the original
+  1xBTS documentation, including prerequisites and node descriptions.
+- [docs/PORTS.md](docs/PORTS.md): network ports used by the nodes (upstream
+  document).
 
 ## Responsible use
 
@@ -198,12 +230,16 @@ only where you are legally authorised to transmit, for example under an
 appropriate licence or inside a shielded test environment. Project Zapp does
 not provide or endorse operational frequency plans.
 
+The imported stack transmits as soon as a base station is started with a
+real SDR radio configured. The default configuration uses no radio.
+
 ## License
 
 Original Project Zapp material is licensed under the
-[Apache License, Version 2.0](LICENSE). Third-party components, including any
-source code derived from 1xBTS, remain under their respective licences and
-copyright notices.
+[Apache License, Version 2.0](LICENSE). Third-party components, including the
+source code imported from 1xBTS
+([`LICENSES/1xBTS-LICENSE.txt`](LICENSES/1xBTS-LICENSE.txt)), remain under
+their respective licences and copyright notices.
 
 ## References
 

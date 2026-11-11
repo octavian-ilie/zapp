@@ -9,22 +9,52 @@ by or a continuation of Telemobil S.A., OTE, Cosmote Romania, Telekom Romania
 or the Zapp commercial network.
 
 ------------------------------------------------------------------------------
-Third-party software
+Third-party software included in this repository
 ------------------------------------------------------------------------------
 
 1xBTS
   Project:   https://github.com/chrismoos/1xbts
-  Author:    Chris Moos and the 1xBTS contributors
+  Copyright: Copyright 2025-2026 Chris Moos
   License:   Apache License, Version 2.0
-  Status:    Not yet included in this repository.
+             (upstream licence file: LICENSES/1xBTS-LICENSE.txt)
+  Revision:  9897714153261b86913ef6c6b18e7f9a344ff4fe (2026-11-08)
 
-  When 1xBTS source is imported, it will keep its original LICENSE and
-  copyright notices. The exact upstream commit and any Project Zapp
-  modifications will be recorded here and next to the imported source.
-  Modified files will carry prominent notices stating that they were changed,
-  as Section 4(b) of the Apache License requires. Project Zapp does not claim
-  ownership of upstream contributions and does not relicense them.
+  The 1xBTS source tree forms the basis of this repository and is kept in
+  its original layout. Project Zapp does not claim ownership of upstream
+  contributions and does not relicense them. Files changed by Project Zapp
+  carry a notice stating so, as Section 4(b) of the Apache License requires.
+  SOURCE_ORIGIN.md lists every change and the material that was not
+  imported.
 
-Components that 1xBTS bundles or depends on (for example under its external/
-directory) are subject to their own licences. They will be listed here, with
-their licence terms, when they are imported.
+usrsctp (external/usrsctp)
+  Copyright: Copyright (c) 2015, Randall Stewart and Michael Tuexen,
+             and the other contributors named in its source files
+  License:   BSD 3-Clause License (external/usrsctp/LICENSE.md)
+
+Fredoka, Inter and JetBrains Mono fonts (crates/cdma-ms/assets/fonts)
+  Copyright: Copyright 2016 The Fredoka Project Authors
+             Copyright 2016 The Inter Project Authors
+             Copyright 2020 The JetBrains Mono Project Authors
+  License:   SIL Open Font License, Version 1.1
+             (crates/cdma-ms/assets/fonts/OFL-*.txt)
+
+Gradle Wrapper (sim/applet/gradle/wrapper/gradle-wrapper.jar)
+  License:   Apache License, Version 2.0 (bundled in the JAR as
+             META-INF/LICENSE)
+
+------------------------------------------------------------------------------
+Dependencies fetched at build time
+------------------------------------------------------------------------------
+
+Rust crates (Cargo.lock), JavaScript packages (1xbts-web/pnpm-lock.yaml) and
+Go modules (apps/speedtest/go.mod) are downloaded by their package managers
+and are not included in this repository. Each remains under its own licence.
+
+------------------------------------------------------------------------------
+Material not distributed
+------------------------------------------------------------------------------
+
+The 1xBTS revision above also contains reference voice codec sources and
+test vectors, carrier PRL test files, PDF specifications and a prebuilt
+smart-card applet that are not included in Project Zapp. SOURCE_ORIGIN.md
+describes each item and the effect of its absence.
