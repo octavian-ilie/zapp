@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Safe Rust wrappers around the QCELP-13K (TIA/ANSI-733) C reference codec.
 //!
 //! Provides [`Qcelp13kEncoder`] and [`Qcelp13kDecoder`] that call through to
@@ -233,6 +236,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn silence_roundtrip() {
         let mut enc = Qcelp13kEncoder::new().expect("encoder init");
         let mut dec = Qcelp13kDecoder::new().expect("decoder init");
@@ -263,6 +270,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn tone_roundtrip() {
         let mut enc = Qcelp13kEncoder::new().expect("encoder init");
         let mut dec = Qcelp13kDecoder::new().expect("decoder init");
@@ -292,6 +303,10 @@ mod tests {
     /// single-threaded. This is the regression that pins "no process-
     /// wide writable state" in place.
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn independent_encoders_can_run_concurrently() {
         let streams: Vec<_> = (0..4u32).map(make_test_stream).collect();
 
@@ -316,6 +331,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn qcelp_and_evrc_a_can_encode_in_same_process() {
         let pcm = tone_frame(650.0, 8000.0, 0.25);
         let mut evrc = EvrcEncoder::new().expect("EVRC encoder init");
@@ -328,6 +347,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn codec_instances_are_reentrant_under_churn() {
         let stream: Vec<_> = (0..16)
             .map(|i| tone_frame(250.0 + i as f64 * 35.0, 7000.0, i as f64 * 0.1))

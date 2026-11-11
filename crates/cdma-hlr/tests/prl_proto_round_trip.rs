@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that read the carrier PRL fixtures
+// compile only when those fixtures are supplied locally (cfg zapp_prl_fixtures).
+// See SOURCE_ORIGIN.md.
 //! Integration test for the PRL editor's save path.
 //!
 //! The full flow when an operator hits Save in the structured editor is:
@@ -14,6 +17,9 @@
 //! That's what this test asserts against every real-carrier PRL we ship
 //! as a fixture. Any proto-conversion bug that drops a field, defaults
 //! it differently, or reorders a list will surface here loudly.
+
+// Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+#![cfg(zapp_prl_fixtures)]
 
 use cdma_hlr::prl_proto;
 use cdma_hlr::proto::PrlSummary;

@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Media feeder management for the MSC runtime.
 //!
 //! Owns active voice feeder tasks (ringback, WAV playback) and delayed WAV
@@ -538,6 +541,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     async fn qcelp_wav_feeder_delivers_rate_set_two_frames() {
         let circuit_id = 41;
         let msc_bearer = Arc::new(VoiceBearerManager::new(Ipv4Addr::LOCALHOST));

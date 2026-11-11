@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that read the carrier PRL fixtures
+// compile only when those fixtures are supplied locally (cfg zapp_prl_fixtures).
+// See SOURCE_ORIGIN.md.
 mod support;
 
 use std::sync::Arc;
@@ -21,6 +24,8 @@ const IMSI_S: u64 = 1234567890;
 const NODE_BLOCKS: usize = 24_000;
 const DWELL_MS: u32 = 300;
 const EVENT_TIMEOUT: Duration = Duration::from_secs(60);
+// Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+#[cfg(zapp_prl_fixtures)]
 const VERIZON_PRL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../cdma-otasp/tests/fixtures/verizon_50408.prl"
@@ -445,6 +450,8 @@ async fn scan_rejects_a_negative_system_and_reports_no_permitted_system() {
     station.shutdown();
 }
 
+// Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+#[cfg(zapp_prl_fixtures)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scan_with_the_verizon_prl_camps_on_the_node() {
     let _ = env_logger::builder().is_test(true).try_init();

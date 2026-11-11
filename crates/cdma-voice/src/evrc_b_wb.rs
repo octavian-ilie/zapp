@@ -1,3 +1,5 @@
+// Modified by Project Zapp (2026): test module gated on locally supplied
+// reference codec material. See SOURCE_ORIGIN.md.
 //! Safe Rust wrappers around the EVRC-B and EVRC-WB C++ reference codec.
 //!
 //! The C++ reference codec is wrapped with per-instance native state, so
@@ -344,7 +346,9 @@ fn decode_native_8k(
     Ok(speech)
 }
 
-#[cfg(test)]
+// Project Zapp: these tests embed restricted reference vectors with
+// include_bytes!, so they compile only when that material is supplied.
+#[cfg(all(test, zapp_reference_codecs, zapp_evrc_b_vectors))]
 mod tests {
     use super::*;
     use std::thread;

@@ -1,6 +1,30 @@
-use std::path::PathBuf;
+// Modified by Project Zapp (2026): the reference codec sources in csrc/ and
+// the EVRC-B vectors in tests/evrc_b_vectors/ are not distributed with
+// Project Zapp. When csrc/ is absent, a stub whose initialisers fail is linked
+// instead, so the crate builds and every codec constructor returns an error.
+// The `zapp_reference_codecs` and `zapp_evrc_b_vectors` cfgs tell the tests
+// which material is present. See SOURCE_ORIGIN.md.
+use std::path::{Path, PathBuf};
 
 fn main() {
+    println!("cargo::rustc-check-cfg=cfg(zapp_reference_codecs)");
+    println!("cargo::rustc-check-cfg=cfg(zapp_evrc_b_vectors)");
+    if Path::new("tests/evrc_b_vectors/input.pcm").is_file() {
+        println!("cargo::rustc-cfg=zapp_evrc_b_vectors");
+    }
+    if !Path::new("csrc/include").is_dir() {
+        // Watch the crate directory so that supplying csrc/ later is noticed.
+        println!("cargo::rerun-if-changed=.");
+        cc::Build::new()
+            .file("zapp/codecs_unavailable.c")
+            .compile("cdma_voice_codecs_unavailable");
+        return;
+    }
+    println!("cargo::rustc-cfg=zapp_reference_codecs");
+    if Path::new("tests").is_dir() {
+        println!("cargo::rerun-if-changed=tests");
+    }
+
     let csrc = PathBuf::from("csrc");
 
     let mut build = cc::Build::new();

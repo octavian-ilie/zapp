@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 use super::*;
 
 const A1_WAIT: Duration = Duration::from_secs(1);
@@ -497,6 +500,10 @@ fn completion_with_bearer(call_id: CallId, remote: std::net::SocketAddr) -> Enco
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(zapp_reference_codecs),
+    ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+)]
 async fn independent_bearers_stay_silent_until_answer_and_route_both_directions() {
     const SILENCE_WAIT: Duration = Duration::from_millis(20);
     for caller_first in [true, false] {

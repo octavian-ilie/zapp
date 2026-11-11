@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that read the carrier PRL fixtures
+// compile only when those fixtures are supplied locally (cfg zapp_prl_fixtures).
+// See SOURCE_ORIGIN.md.
 //! OTASP and OTAPA session state machine (C.S0016-D §3.2 and §3.5).
 
 use cdma_otasp::message::commit::{CommitRequest, CommitResponse};
@@ -3684,11 +3687,15 @@ mod tests {
         assert_eq!(req.block_id, BLOCK_PRL_EXTENDED);
     }
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     /// Raw US Cellular Extended PRL captured from a phone that accepted
     /// the classic Dimensions request (it never sent result code 0x23),
     /// leaving `cur_sspr_p_rev` at the classic default.
     const USC_15118_PRL: &[u8] = include_bytes!("../../../cdma-otasp/tests/fixtures/usc_15118.prl");
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     #[test]
     fn extended_prl_read_back_under_classic_dims_decodes_as_extended() {
         match decode_prl_outcome(USC_15118_PRL.to_vec(), 1) {
@@ -3702,6 +3709,8 @@ mod tests {
         }
     }
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     #[test]
     fn classic_prl_read_back_still_decodes_as_classic() {
         let bytes = include_bytes!("../../../cdma-otasp/tests/fixtures/verizon_50408.prl");
@@ -3714,6 +3723,8 @@ mod tests {
         }
     }
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     /// A corrupted buffer must not be accepted by the Extended fallback;
     /// the reported reason stays the classic decoder's failure.
     #[test]

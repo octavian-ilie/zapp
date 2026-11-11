@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that read the carrier PRL fixtures
+// compile only when those fixtures are supplied locally (cfg zapp_prl_fixtures).
+// See SOURCE_ORIGIN.md.
 //! PRL image checks (C.S0016 §3.5.5).
 
 const CRC_POLY: u16 = 0x1021;
@@ -45,7 +48,8 @@ pub fn check_prl_bytes(key: &str, data: &[u8], ef_size: usize) -> Vec<String> {
     problems
 }
 
-#[cfg(test)]
+// Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+#[cfg(all(test, zapp_prl_fixtures))]
 mod tests {
     use super::*;
 

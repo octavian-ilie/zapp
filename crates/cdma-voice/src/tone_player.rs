@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Synthetic tone generators for forward traffic-channel media.
 
 use crate::{SAMPLES_PER_FRAME, VoiceCodec, VoiceEncoder, VoiceFrame, encode_pcm_frame};
@@ -112,6 +115,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn na_ringback_starts_tone_on() {
         let mut player = RingbackTonePlayer::new(RingbackToneKind::Nanp).expect("player init");
         let pcm = player.synthesize_pcm_frame();
@@ -119,6 +126,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn na_ringback_goes_silent_after_two_seconds() {
         let profile = RingbackToneKind::Nanp.profile();
         let mut player = RingbackTonePlayer::new(RingbackToneKind::Nanp).expect("player init");
@@ -131,6 +142,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn na_ringback_returns_after_full_cycle() {
         let profile = RingbackToneKind::Nanp.profile();
         let mut player = RingbackTonePlayer::new(RingbackToneKind::Nanp).expect("player init");
@@ -140,6 +155,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn european_ringback_goes_silent_after_one_second() {
         let profile = RingbackToneKind::Etsi.profile();
         let mut player = RingbackTonePlayer::new(RingbackToneKind::Etsi).expect("player init");

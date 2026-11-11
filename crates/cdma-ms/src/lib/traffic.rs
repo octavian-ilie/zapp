@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 use std::collections::VecDeque;
 
 use cdma_bts::channels::rtch_rc3::{self, Rc3Frame, Rc3Rate};
@@ -1712,6 +1715,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn evrc_microphone_frame_uses_the_matching_rc3_rate() {
         let mut session = TrafficSession::new(7, assignment(), 3, None, false, None, 0, 0);
         session.frames_sent = PREAMBLE_FRAMES;

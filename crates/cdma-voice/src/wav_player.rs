@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! WAV file voice player for CDMA2000 forward traffic channel.
 //!
 //! Reads an 8 kHz mono 16-bit PCM WAV file and produces encoded voice
@@ -133,6 +136,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn test_voice_frame_bits_length() {
         let mut player = make_player(vec![0i16; 320]); // 2 frames worth
 
@@ -152,6 +159,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn test_partial_last_frame() {
         let mut player = make_player(vec![0i16; 200]); // 1.25 frames
 

@@ -1,4 +1,12 @@
+// Modified by Project Zapp (2026): detects the locally supplied reference voice
+// codecs (cfg zapp_reference_codecs). See SOURCE_ORIGIN.md.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Project Zapp: detect locally supplied third-party material.
+    println!("cargo::rustc-check-cfg=cfg(zapp_reference_codecs)");
+    println!("cargo::rerun-if-changed=../cdma-voice");
+    if std::path::Path::new("../cdma-voice/csrc/include").is_dir() {
+        println!("cargo::rustc-cfg=zapp_reference_codecs");
+    }
     tonic_build::configure()
         .build_server(true)
         .build_client(true)

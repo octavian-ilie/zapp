@@ -1,3 +1,5 @@
+// Modified by Project Zapp (2026): test module gated on locally supplied
+// reference codec material. See SOURCE_ORIGIN.md.
 //! TIA-96 / IS-96A Service Option 1 speech codec.
 
 use std::ffi::c_void;
@@ -165,7 +167,9 @@ impl Drop for Tia96Decoder {
     }
 }
 
-#[cfg(test)]
+// Project Zapp: these tests embed restricted reference vectors with
+// include_bytes!, so they compile only when that material is supplied.
+#[cfg(all(test, zapp_reference_codecs))]
 mod tests {
     use super::*;
     use std::thread;

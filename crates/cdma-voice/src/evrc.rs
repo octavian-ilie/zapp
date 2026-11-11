@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Safe Rust wrappers around the EVRC C reference codec.
 //!
 //! Provides [`EvrcEncoder`] and [`EvrcDecoder`] that call through to the
@@ -270,6 +273,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn test_encode_silence() {
         let mut enc = EvrcEncoder::new().expect("encoder init");
         let silence = [0i16; 160];
@@ -285,6 +292,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn test_encode_decode_roundtrip() {
         let mut enc = EvrcEncoder::new().expect("encoder init");
         let mut dec = EvrcDecoder::new().expect("decoder init");
@@ -302,12 +313,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn decoder_accepts_explicit_erasure() {
         let mut decoder = EvrcDecoder::new().expect("decoder init");
         decoder.decode_erasure().expect("decode erasure");
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn independent_encoders_can_run_concurrently() {
         let expected_a = encode_sequence();
         let expected_b = encode_sequence();
@@ -323,6 +342,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn independent_decoders_can_run_concurrently() {
         let packets = encode_sequence();
         let decode_sequence = || {

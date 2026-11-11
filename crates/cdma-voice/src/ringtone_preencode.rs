@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Pre-encode a WAV ringtone into every supported voice codec.
 //!
 //! Used at upload time by the HLR's `SetSubscriberRingtone` RPC. Reads a
@@ -226,6 +229,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn encodes_8k_mono_identity_path() {
         // 100 ms of silence at 8 kHz mono.
         let samples = vec![0i16; 800];
@@ -242,6 +249,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn encodes_44100_stereo_resample_path() {
         // 250 ms of silence at 44.1 kHz stereo.
         let n = 11_025 * 2; // 250 ms * 2 channels

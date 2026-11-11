@@ -1,3 +1,5 @@
+// Modified by Project Zapp (2026): tests that need the reference voice codecs
+// are ignored unless the codecs are supplied locally. See SOURCE_ORIGIN.md.
 //! RC2 reverse-traffic frame aligner / demod (SR1 IS-95B Rate Set 2).
 //!
 //! Spec: C.S0002-E §2.1.3.1.1.2 — Reverse Traffic Channel for RC2, voice
@@ -1075,6 +1077,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn qcelp13k_payload_survives_rc2_full_reverse_air_interface_multi_frame() {
         // RC2 Full has 267 info bits — enough for any QCELP-13K rate (Full
         // is 266 bits, smaller rates are 124 / 54 / 20). 5 consecutive
@@ -1083,6 +1089,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn qcelp13k_silence_payload_survives_rc2_full_reverse_air_interface() {
         // Silence drives the encoder to Eighth rate (20 bits), the smallest
         // QCELP payload — proves the bit-survival path for the degenerate

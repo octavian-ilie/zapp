@@ -1,3 +1,5 @@
+// Modified by Project Zapp (2026): tests that need the excluded 208 MB EV-DO
+// capture are ignored unless it is supplied locally. See SOURCE_ORIGIN.md.
 //! HRPD forward-link acquisition and Control Channel decode.
 //!
 //! Accepts complex samples at an integer multiple of the 1.2288 Mcps chip
@@ -4564,6 +4566,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_evdo_downlink_capture),
+        ignore = "requires test/iq/evdo_downlink_884490_4x_chip.wav (208 MB), which is not distributed with Project Zapp"
+    )]
     fn rake_decodes_884490_forward_overhead_chain() {
         let path = fixture_path("evdo_downlink_884490_4x_chip.wav");
         let (sample_rate, mut samples) = read_complex_wav(&path);
@@ -4603,6 +4609,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_evdo_downlink_capture),
+        ignore = "requires test/iq/evdo_downlink_884490_4x_chip.wav (208 MB), which is not distributed with Project Zapp"
+    )]
     fn decodes_sync_from_884490_downlink_capture_wav() {
         let path = fixture_path("evdo_downlink_884490_4x_chip.wav");
         let (sample_rate, samples) = read_complex_wav(&path);

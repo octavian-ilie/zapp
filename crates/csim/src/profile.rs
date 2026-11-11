@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Subscriber profiles: the YAML a card is personalized from.
 
 use std::net::Ipv4Addr;
@@ -923,6 +926,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_prl_fixtures),
+        ignore = "requires the carrier PRL fixtures, which are not distributed with Project Zapp"
+    )]
     fn example_profile_loads_and_validates() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sim/examples/card.yaml");
         let p = Profile::load(&path).unwrap();

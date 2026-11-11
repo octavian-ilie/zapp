@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that read the carrier PRL fixtures
+// compile only when those fixtures are supplied locally (cfg zapp_prl_fixtures).
+// See SOURCE_ORIGIN.md.
 //! PRL channel selection (C.S0016 §3.5.5).
 
 use std::collections::HashSet;
@@ -497,11 +500,17 @@ impl Expander {
 mod tests {
     use super::*;
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     const VERIZON_CLASSIC: &[u8] =
         include_bytes!("../../../cdma-otasp/tests/fixtures/verizon_50408.prl");
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     const VERIZON_EXTENDED: &[u8] =
         include_bytes!("../../../cdma-otasp/tests/fixtures/verizon_51611.prl");
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     #[test]
     fn classic_verizon_expands_in_acquisition_table_order() {
         let plan = PrlScanPlan::from_bytes(VERIZON_CLASSIC).unwrap();
@@ -532,6 +541,8 @@ mod tests {
         assert_eq!(plan.systems.len(), 794);
     }
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     #[test]
     fn classic_verizon_verdicts() {
         let plan = PrlScanPlan::from_bytes(VERIZON_CLASSIC).unwrap();
@@ -547,6 +558,8 @@ mod tests {
         assert_eq!(plan.verdict(65000, 1), PrlVerdict::Unlisted);
     }
 
+    // Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+    #[cfg(zapp_prl_fixtures)]
     #[test]
     fn extended_verizon_expands_generic_and_pcs_records() {
         let plan = PrlScanPlan::from_bytes(VERIZON_EXTENDED).unwrap();

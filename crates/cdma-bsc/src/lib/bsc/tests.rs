@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 #![allow(dead_code, unused_imports)]
 
 use std::time::Duration;
@@ -1388,6 +1391,10 @@ async fn mt_voice_on_pre_is2000_traffic_releases_before_paging() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    not(zapp_reference_codecs),
+    ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+)]
 async fn reverse_qcelp_media_requires_active_session_and_stops_on_release() {
     let (mut bsc, _traffic_rx, walsh_code) =
         test_bsc_with_active_traffic_channel(SERVICE_OPTION_QCELP13).await;

@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 //! Circuit session management for the MSC runtime.
 //!
 //! Owns per-circuit metadata, assignment-complete correlation, secondary-leg
@@ -401,6 +404,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn bridge_transcodes_evrc_to_qcelp_for_peer_circuit() {
         let mut encoder =
             cdma_voice::VoiceEncoder::new(cdma_voice::VoiceCodec::EvrcA).expect("EVRC encoder");

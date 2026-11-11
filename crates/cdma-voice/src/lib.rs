@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 pub mod encoded_stream;
 pub mod evrc;
 pub mod evrc_b_wb;
@@ -412,6 +415,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn tia96_and_evrc_transcode_in_both_directions() {
         let mut tia96_encoder = VoiceEncoder::new(VoiceCodec::Tia96).expect("TIA-96 encoder");
         let mut tia96_to_evrc = VoiceTranscoder::new(VoiceCodec::Tia96, VoiceCodec::EvrcA)
@@ -447,6 +454,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn every_voice_codec_pair_transcodes_in_both_directions() {
         let codecs = [
             VoiceCodec::Tia96,
@@ -478,6 +489,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn evrc_and_qcelp_transcode_in_both_directions() {
         let mut evrc_encoder = VoiceEncoder::new(VoiceCodec::EvrcA).expect("EVRC encoder");
         let mut evrc_to_qcelp = VoiceTranscoder::new(VoiceCodec::EvrcA, VoiceCodec::Qcelp13k)
@@ -513,6 +528,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     fn evrc_a_quarter_rate_is_transcoded_as_an_erasure() {
         let mut transcoder = VoiceTranscoder::new(VoiceCodec::EvrcA, VoiceCodec::Qcelp13k)
             .expect("EVRC to QCELP transcoder");

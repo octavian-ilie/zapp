@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that read the carrier PRL fixtures
+// compile only when those fixtures are supplied locally (cfg zapp_prl_fixtures).
+// See SOURCE_ORIGIN.md.
 //! Real-carrier PRL fixtures decoded through our classic PRL parser.
 //!
 //! Each `.prl` file is the raw on-wire PRL the BS would reassemble
@@ -8,6 +11,9 @@
 //! Classic (SSPR_P_REV = 1) fixtures should decode cleanly with a
 //! matching CRC. Extended (SSPR_P_REV >= 2) fixtures must NOT decode
 //! as classic.
+
+// Project Zapp: requires the carrier PRL fixtures, which are not distributed.
+#![cfg(zapp_prl_fixtures)]
 
 use cdma_otasp::param::prl;
 

@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): tests that need third-party material not
+// distributed with Project Zapp are ignored unless it is supplied locally.
+// See SOURCE_ORIGIN.md.
 mod access;
 mod m2m;
 
@@ -8261,6 +8264,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg_attr(
+        not(zapp_reference_codecs),
+        ignore = "requires the reference voice codecs, which are not distributed with Project Zapp"
+    )]
     async fn m2m_bearer_transcodes_evrc_and_qcelp_in_both_directions() {
         let msc_bearer = Arc::new(VoiceBearerManager::new(std::net::Ipv4Addr::LOCALHOST));
         let bsc_bearer = VoiceBearerManager::new(std::net::Ipv4Addr::LOCALHOST);
