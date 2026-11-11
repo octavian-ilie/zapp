@@ -2,13 +2,16 @@
 
 **An open-source restoration of Romania's historical Zapp CDMA mobile network.**
 
-> **Status: early development.** This repository contains the CDMA2000
-> software stack imported from 1xBTS. It builds and passes its automated
-> software tests on Linux. Nothing has been verified over the air or with
-> handsets, and the Zapp distribution itself (installer, managed services,
-> Zapp Network Studio) does not exist yet. Functionality and handset
-> compatibility will be documented only after they have been implemented and
-> tested.
+> **Status: early development.** Initial upstream audit completed.
+> Standalone source integration in progress. Full validation pending.
+>
+> This repository contains the CDMA2000 software stack imported from 1xBTS,
+> without some third-party material whose redistribution terms are unresolved
+> (see [`SOURCE_ORIGIN.md`](SOURCE_ORIGIN.md)). The network has not been run
+> as a whole. Nothing has been verified over the air or with handsets, and the
+> Zapp distribution itself (installer, managed services, Zapp Network Studio)
+> does not exist yet. Functionality and handset compatibility will be
+> documented only after they have been implemented and tested.
 
 ---
 
@@ -148,12 +151,16 @@ change made by Project Zapp, and the material that was not imported.
 
 The most significant exclusion is the **reference voice codecs**. Their
 redistribution terms are unresolved, so they are not included. Without them,
-the stack builds and runs, but voice transcoding, tones, announcements and
-the SIP voice gateway are unavailable.
+the stack builds, but voice transcoding, tones, announcements and the SIP
+voice gateway are unavailable. Full voice support remains a project goal.
 
-On Linux, the imported code builds and passes its automated tests. These are
-software tests (codecs, protocol state machines, synthetic signals), so they
-do not show that any capability works over the air.
+Validation of the integration is still in progress. In a local Linux build,
+the imported code compiles and the automated tests that do not need the
+excluded material pass. That is a reduced version of the upstream test suite.
+These are software tests (protocol state machines, synthetic signals), so they
+do not show that any capability works over the air. Full validation,
+including the SDR builds, the SIP voice gateway and the database-backed tests,
+is pending.
 
 Third-party components remain under their own licences. See
 [`NOTICE`](NOTICE).
@@ -163,9 +170,10 @@ Third-party components remain under their own licences. See
 | Area | Status |
 | --- | --- |
 | Repository, licensing and documentation | In progress |
-| 1xBTS source import | Done: imported at `9897714`; builds and passes its automated software tests on Linux |
+| Upstream technical audit | Done: initial audit of 1xBTS `9897714` |
+| Standalone source integration | In progress: source imported at `9897714`; full validation pending |
 | CDMA2000 1x network services | Imported from 1xBTS; software tests only, not verified with handsets |
-| Voice | Limited: reference voice codecs not included (see `SOURCE_ORIGIN.md`) |
+| Voice | Limited: reference voice codecs not included (see `SOURCE_ORIGIN.md`); full voice support remains a goal |
 | EV-DO packet data | Imported from 1xBTS (experimental upstream); not verified |
 | Zapp Network Studio | Not started (the upstream dashboard is imported as `1xbts-web`) |
 | Installation and service management | Not started |
