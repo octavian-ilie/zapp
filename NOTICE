@@ -18,10 +18,11 @@ Third-party software included in this repository
   License:   Apache License, Version 2.0 (LICENSE, the upstream licence file)
   Revision:  9897714153261b86913ef6c6b18e7f9a344ff4fe (2026-11-08)
 
-  The complete 1xBTS source tree at this revision is included without
-  modification, at its original paths. Project Zapp does not claim ownership
-  of upstream contributions and does not relicense them. SOURCE_ORIGIN.md
-  records the import.
+  The complete 1xBTS source tree at this revision is included at its
+  original paths. Project Zapp does not claim ownership of upstream
+  contributions and does not relicense them. Files changed by Project Zapp
+  carry a notice stating so, as Section 4(b) of the Apache License requires.
+  SOURCE_ORIGIN.md records the import and lists every change.
 
 The 1xBTS tree contains the following material, which carries its own terms.
 Those terms are not the Apache License and are not changed by it.

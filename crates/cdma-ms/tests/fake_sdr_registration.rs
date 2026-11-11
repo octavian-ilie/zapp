@@ -1,3 +1,7 @@
+// Modified by Project Zapp (2026): the fake-SDR tests in this file take turns
+// through FAKE_SDR_SERIAL instead of running concurrently. Assertions and
+// timeouts are unchanged. See SOURCE_ORIGIN.md.
+
 mod support;
 
 use std::sync::Arc;
@@ -14,6 +18,12 @@ use cdma_ms::tx::MsAccessIdentity;
 
 const FAKE_SDR_EVENT_TIMEOUT: Duration = Duration::from_secs(20);
 const FAKE_BTS_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+
+// Each test runs a real-time-paced BTS and mobile station. Run concurrently,
+// they interfere: the single MO SMS can be lost while the repeating
+// registrations still succeed. Holding this lock for the whole test makes the
+// tests run one at a time.
+static FAKE_SDR_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn calibration(tx_delay_samples: i64) -> TxCalibration {
     TxCalibration {
@@ -72,6 +82,7 @@ async fn run_registration_with_calibration(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fake_sdr_registers_with_reduced_peak_and_relative_access_ramp() {
+    let _serial = FAKE_SDR_SERIAL.lock().await;
     let mut calibration = calibration(0);
     calibration.peak_limit = 0.4;
     calibration.relative_access_power = true;
@@ -81,6 +92,7 @@ async fn fake_sdr_registers_with_reduced_peak_and_relative_access_ramp() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fake_sdr_registers_with_no_group_delay() {
+    let _serial = FAKE_SDR_SERIAL.lock().await;
     let _ = env_logger::builder().is_test(true).try_init();
     assert!(
         run_registration(0, 0, 0).await,
@@ -90,6 +102,7 @@ async fn fake_sdr_registers_with_no_group_delay() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fake_sdr_registers_with_group_delay_cancelled_by_tx_delay() {
+    let _serial = FAKE_SDR_SERIAL.lock().await;
     let _ = env_logger::builder().is_test(true).try_init();
     let os = (support::SAMPLE_RATE_HZ / support::CHIP_RATE_HZ) as i64;
     assert!(
@@ -100,6 +113,7 @@ async fn fake_sdr_registers_with_group_delay_cancelled_by_tx_delay() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fake_sdr_registers_with_pilot_pn_510() {
+    let _serial = FAKE_SDR_SERIAL.lock().await;
     let _ = env_logger::builder().is_test(true).try_init();
     assert!(
         run_registration(0, 0, 510).await,
@@ -109,6 +123,7 @@ async fn fake_sdr_registers_with_pilot_pn_510() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fake_sdr_delivers_mo_sms_over_hardware_time() {
+    let _serial = FAKE_SDR_SERIAL.lock().await;
     let _ = env_logger::builder().is_test(true).try_init();
     let esn: u32 = 0x4CDC_1D09;
 

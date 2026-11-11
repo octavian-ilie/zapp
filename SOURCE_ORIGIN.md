@@ -14,7 +14,7 @@ Zapp adds next to it.
 | Import date | 2026-11-11 |
 | Imported paths | All 1,649 files tracked at that commit, at their original paths |
 | Git LFS | 37 of those files are stored with Git LFS, as upstream stores them (34 distinct objects, 229 MB in total) |
-| Modifications | None |
+| Modifications | One upstream test file, listed under [Changes made by Project Zapp](#changes-made-by-project-zapp) |
 
 The import is a one-time snapshot. The repository has no Git submodules, no
 subtrees, no upstream remote and no automatic synchronisation, and nothing is
@@ -36,8 +36,17 @@ A file-by-file comparison against the upstream commit checked, for each of the
   same SHA-256 and size as the LFS object;
 - that the executable bit matches the file mode.
 
-All 1,649 paths matched. No upstream file is modified, moved, removed or left
-out.
+All 1,649 paths matched. At import, no upstream file was modified, moved,
+removed or left out.
+
+## Changes made by Project Zapp
+
+Each changed upstream file carries a notice at the top stating that Project
+Zapp modified it, as Section 4(b) of the Apache License requires.
+
+| File | Change | Reason |
+| --- | --- | --- |
+| `crates/cdma-ms/tests/fake_sdr_registration.rs` | The five fake-SDR tests take a shared lock, so they run one at a time instead of concurrently. Assertions and timeouts are unchanged. | `fake_sdr_delivers_mo_sms_over_hardware_time` failed intermittently, also on unmodified upstream and in upstream's own CI. Run alone, its SMS arrived after 12.8 s every time. Run concurrently with the other four tests, the SMS never arrived, even with the wait raised from 20 s to 120 s. Run one at a time, all five tests passed every time. |
 
 ## Project Zapp files
 
