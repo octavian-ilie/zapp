@@ -3,7 +3,7 @@
 **An open-source restoration of Romania's historical Zapp CDMA mobile network.**
 
 > **Status: early development.** Initial upstream audit completed. The
-> complete 1xBTS source is imported, with one test fix by Project Zapp. Full
+> complete 1xBTS source is imported, with four fixes by Project Zapp. Full
 > validation pending.
 >
 > The network has not been run as a whole. Nothing has been verified over the
@@ -151,9 +151,10 @@ includes every crate and network component, the reference voice codecs, the
 SIP voice gateway, the SIM applet, the test data and the CI workflow. Nothing
 is cloned from 1xBTS at build or install time. From here on, Project Zapp
 develops it independently, and keeps its own changes separate from this
-baseline. So far, Project Zapp has changed one upstream test file.
-[`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md) records the import, how it was
-checked, and every change.
+baseline. So far, Project Zapp has fixed one intermittently failing test and
+three bugs found in code review, in five upstream files, and listed the bug
+fixes in upstream's `CHANGELOG.md`. [`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md)
+records the import, how it was checked, and every change.
 
 Validation of the import is in progress. Upstream's CI workflow runs
 unmodified on this repository. On GitHub it builds the workspace, including
@@ -163,9 +164,10 @@ upstream's own CI at the same revision: 4,271 passed, and 44 are ignored by
 upstream. One upstream test failed intermittently; Project Zapp has fixed the
 test (see [`SOURCE_ORIGIN.md`](../SOURCE_ORIGIN.md)). These are software tests
 (protocol state machines, synthetic and recorded signals), so they do not show
-that any capability works over the air. Full validation, including the
-database-backed tests, the web dashboard and tests with real radios and
-handsets, is pending.
+that any capability works over the air. The database-backed tests, which CI
+does not run, pass locally against PostgreSQL 16. Full validation, including
+the web dashboard as a whole and tests with real radios and handsets, is
+pending.
 
 Some files in the 1xBTS tree, including the reference voice codecs, are under
 their own terms rather than the Apache License. See [`NOTICE`](../NOTICE).
@@ -176,7 +178,7 @@ their own terms rather than the Apache License. See [`NOTICE`](../NOTICE).
 | --- | --- |
 | Repository, licensing and documentation | In progress |
 | Upstream technical audit | Done: initial audit of 1xBTS `9897714` |
-| Upstream source import | Done: complete 1xBTS `9897714`, one test fix by Project Zapp; full validation pending |
+| Upstream source import | Done: complete 1xBTS `9897714`, with four fixes by Project Zapp (see `SOURCE_ORIGIN.md`); full validation pending |
 | CDMA2000 1x network services | Imported from 1xBTS; software tests only, not verified with handsets |
 | Voice | Imported from 1xBTS, including the reference codecs and the SIP voice gateway; software tests pass in CI; not tested with calls |
 | EV-DO packet data | Imported from 1xBTS (experimental upstream); not verified |
@@ -184,7 +186,7 @@ their own terms rather than the Apache License. See [`NOTICE`](../NOTICE).
 | Installation and service management | Not started |
 | Diagnostics and simulation | Upstream simulation tools imported; not yet integrated |
 | Historical network profiles | Not started |
-| Automated testing and CI | Upstream CI workflow imported unmodified; runs on every pull request; database-backed tests not yet run |
+| Automated testing and CI | Upstream CI workflow imported unmodified; runs on every pull request; database-backed tests run locally only |
 
 ## Roadmap
 

@@ -1,4 +1,8 @@
+<!-- Modified by Project Zapp (2026): added the three entries marked "(Project Zapp)" at the top of HEAD. See SOURCE_ORIGIN.md. -->
 # HEAD
+- Fixed the web dashboard's WebSocket hub not reaching the dashboard's own API when the server listens on `::1` (what `localhost` resolves to on many systems) or on a specific address (Project Zapp).
+- Fixed `GET /api/subscribers` returning only the newest 100 subscribers, so the subscribers page could not show the rest (Project Zapp).
+- Fixed HLR subscriber provisioning keeping a new or updated subscriber when the request's ESN, MEID or IMEI was already in use or its identity had no IMSI. The subscriber, identity and IMEI are now stored in one transaction (Project Zapp).
 - Airave 2.5 (5.x firmware) femtocells now receive a changed `term_auth_psk` on the next sync (EV-DO terminal authentication failed after the secret was regenerated).
 - A1 now runs as A1p (BSAP over SUA over SCTP 14001).
 - Abis traffic, A2p, A8/A10, A9, A11 and A21 now use their standard formats and ports, so third-party PCFs and PDSNs interoperate. `docs/PORTS.md` lists the ports.

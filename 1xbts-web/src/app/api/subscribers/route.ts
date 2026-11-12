@@ -1,3 +1,6 @@
+// Modified by Project Zapp (2026): GET returns every subscriber, fetched page
+// by page, instead of only the newest 100. See SOURCE_ORIGIN.md.
+
 import { getHlrClient, waitForHlrReady } from "@/lib/grpc/hlr-client";
 import {
   NumberPlan,
@@ -24,6 +27,9 @@ function withStatusLabel(subscriber: Subscriber) {
 
 export const dynamic = "force-dynamic";
 
+// The subscribers page shows the whole list, so GET fetches every page.
+const SUBSCRIBER_PAGE_SIZE = 1000;
+
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : "";
 }
@@ -49,13 +55,22 @@ export async function GET() {
   try {
     await waitForHlrReady();
     const client = getHlrClient();
-    const result = await client.listSubscribers(
-      { limit: 100, offset: 0 },
-      { signal: abort.signal }
-    );
+    const subscribers: Subscriber[] = [];
+    let total = 0;
+    for (;;) {
+      const page = await client.listSubscribers(
+        { limit: SUBSCRIBER_PAGE_SIZE, offset: subscribers.length },
+        { signal: abort.signal }
+      );
+      total = page.total;
+      subscribers.push(...page.subscribers);
+      if (page.subscribers.length < SUBSCRIBER_PAGE_SIZE || subscribers.length >= total) {
+        break;
+      }
+    }
     return Response.json({
-      subscribers: result.subscribers.map(withStatusLabel),
-      total: result.total,
+      subscribers: subscribers.map(withStatusLabel),
+      total,
     });
   } catch (err) {
     return apiError(err, "load subscribers");

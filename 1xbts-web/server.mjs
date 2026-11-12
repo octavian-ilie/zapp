@@ -1,3 +1,7 @@
+// Modified by Project Zapp (2026): the WebSocket hub fetches this server at
+// the address it actually listens on, not always at 127.0.0.1. See
+// SOURCE_ORIGIN.md.
+
 // Serves the Next.js app and a WebSocket hub on /ws from one port. The hub holds
 // one upstream copy of each topic however many tabs subscribe. WebSockets do not
 // count against the browser's per-host HTTP connection limit, so any number of
@@ -16,7 +20,8 @@ function arg(names, fallback) {
 const dev = process.env.NODE_ENV !== "production";
 const hostname = arg(["--hostname", "-H"], process.env.HOSTNAME || "localhost");
 const port = Number(arg(["--port", "-p"], process.env.PORT || "3000"));
-const SELF = `http://127.0.0.1:${port}`;
+// Replaced by selfUrl() once the server is listening.
+let SELF = `http://127.0.0.1:${port}`;
 
 const WS_PATH = "/ws";
 const EVENTS_PATH = "/api/events";
@@ -47,6 +52,15 @@ const POLL_MS = [
   ["/api/bts", 5000],
   ["/api/base-stations", 5000],
 ];
+
+// The hub fetches the API routes from this same server, so it must use an
+// address the server listens on: "localhost" can resolve to ::1 only, and a
+// specific --hostname need not include 127.0.0.1. A wildcard listener is
+// reached on loopback.
+function selfUrl({ address, port }) {
+  const host = address === "0.0.0.0" ? "127.0.0.1" : address === "::" ? "::1" : address;
+  return `http://${host.includes(":") ? `[${host}]` : host}:${port}`;
+}
 
 function pollMsFor(key) {
   const path = key.split("?")[0];
@@ -235,6 +249,7 @@ wss.on("connection", (socket) => {
 });
 
 server.listen(port, hostname, () => {
+  SELF = selfUrl(server.address());
   console.log(`> Ready on http://${hostname}:${port} (${dev ? "dev" : "production"}, live updates on ${WS_PATH})`);
   void readEvents();
 });

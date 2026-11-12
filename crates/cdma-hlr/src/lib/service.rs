@@ -1,3 +1,7 @@
+// Modified by Project Zapp (2026): UpsertSubscriber stores the subscriber, its
+// identity and IMEI through HlrRepository::upsert_subscriber_with_identity, so
+// a rejected identity leaves no partial change. See SOURCE_ORIGIN.md.
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,8 +14,8 @@ use uuid::Uuid;
 use crate::model;
 use crate::proto;
 use crate::repository::{
-    HlrRepository, PostgresHlrRepository, number_plan_from_proto, number_plan_to_proto,
-    number_type_from_proto, number_type_to_proto,
+    HlrRepository, IdentityUpsert, PostgresHlrRepository, number_plan_from_proto,
+    number_plan_to_proto, number_type_from_proto, number_type_to_proto,
 };
 
 const DEFAULT_MOBILES_SEEN_PAGE_SIZE: u32 = 50;
@@ -259,43 +263,30 @@ impl proto::hlr_service_server::HlrService for HlrServiceImpl {
         let number_plan = number_plan_from_proto(req.number_plan);
         let status = status_from_proto_i32(req.status)?;
 
-        let subscriber = self
+        let has_identity = req.imsi.is_some() || req.esn.is_some() || req.meid.is_some();
+        let identity = has_identity.then(|| IdentityUpsert {
+            imsi: req.imsi.as_deref(),
+            esn: req.esn,
+            meid: req.meid.as_deref(),
+            imei: req.imei.as_deref(),
+        });
+
+        let (subscriber, identity) = self
             .repo
-            .upsert_subscriber(
+            .upsert_subscriber_with_identity(
                 &req.phone_number,
                 &req.display_name,
                 status.as_str(),
                 number_type,
                 number_plan,
+                identity,
             )
             .await
-            .map_err(|e| {
-                log::error!("HLR: {e}");
-                HLR.database()
-            })?;
-
-        let has_identity = req.imsi.is_some() || req.esn.is_some() || req.meid.is_some();
-
-        let identity = if has_identity {
-            let id = self
-                .repo
-                .upsert_identity(
-                    subscriber.subscriber_id,
-                    req.imsi.as_deref(),
-                    req.esn,
-                    req.meid.as_deref(),
-                )
-                .await
-                .map_err(map_repo_error)?;
-            let id = self.apply_identity_imei(id, req.imei.as_deref()).await?;
-            Some(identity_to_proto(&id))
-        } else {
-            None
-        };
+            .map_err(map_repo_error)?;
 
         Ok(Response::new(proto::UpsertSubscriberResponse {
             subscriber: Some(subscriber_to_proto(&subscriber)),
-            identity,
+            identity: identity.as_ref().map(identity_to_proto),
         }))
     }
 
